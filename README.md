@@ -1,0 +1,2 @@
+# SmartMonitoring
+Federated Learning Project
