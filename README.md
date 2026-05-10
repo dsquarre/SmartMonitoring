@@ -1,6 +1,6 @@
-# Smart Monitoring System
-
-## Federated Learning System for Healthcare monitoring system.
+# Federated Learning System for Healthcare 
+Sponsored by AWS Amazon
+- Compeletely abstracted code pipeline for Federated Learning
 
 Repository is divided into two dirs
 - client/
@@ -32,3 +32,28 @@ Repository is divided into two dirs
 - Authentication 
 - Error and edge cases handling
 - Testing on AWS server and online clients to check convergence 
+
+## How to Use
+
+### Client
+- Model definition is as defined in model.py and can be changed keeping the essence of funtions same.
+- Upload the dataset and pass args to main.py; In our example we have preprocessed numpy arrays stored in data/dataset.npz
+- Set the configs like server url and epochs and run main.py
+
+```bash
+mkdir data
+#copy the dataset.npz in data dir
+pip install -r requirements.txt
+python3 main.py -d data/dataset.npz
+```
+
+### Server
+- Model definition must be safe as client.
+- set the configs like rounds_left (no of rounds)
+- run main.py through fastapi
+- logs will be saved in server_log.txt
+
+```bash
+pip install -r requirements.txt
+fastapi run main.py > server_log.txt 2>&1 &
+```

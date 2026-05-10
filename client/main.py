@@ -5,11 +5,16 @@ import requests
 import time
 import collections
 from model import Model
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument("-d","--dataset", type=str, help="Path to dataset.npz")
+args = parser.parse_args()
 
 server_url = "http://0.0.0.0:8000"
 client_id = None
 epochs = 5
-model = Model()
+model = Model(args.dataset)
 def download_model(save_path):
     url = f"{server_url}/download"
     try:

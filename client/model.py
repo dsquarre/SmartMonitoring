@@ -13,14 +13,14 @@ from sklearn.metrics import (
 
 class Model:
 
-    def __init__(self):
-        data = np.load("data/dataset.npz")
+    def __init__(self,path):
+        data = np.load(path)
 
         X = data['X']
 
-        y_anom = data['y_anom']
+        y_anom = data['y_anomaly']
 
-        y_dis = data['y_dis']
+        y_dis = data['y_disease']
 
         (
 
