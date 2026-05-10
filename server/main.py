@@ -20,7 +20,7 @@ model = Model()
 app = FastAPI()
 current_round = 1
 client_queues = deque()
-client_evals = deque()
+client_metrics = deque()
 done = False
 global_metrics = {}
 
@@ -106,13 +106,49 @@ def aggregate_models():
         rounds_left -= 1
 
 def evaluate():
-    global client_evals,done,global_metrics
+    global client_metrics,done,global_metrics
+    print(client_metrics)
     #client is a deque of tuple (local_metrics,samples)->(dict,int)
-    if len(client_evals)>2:
-        
+    if len(client_metrics)>2:
+        total_samples = sum(samples for _, samples in client_metrics)
+        metric_names = client_metrics[0][0].keys()
+        for metric in metric_names:
+            weighted_metric = 0.0
+            for metrics, samples in client_metrics:
+                weighted_metric += (metrics[metric]* (samples/total_samples))
+            global_metrics[metric] = weighted_metric
         done = True
+        with open("global_metrics.txt", "w") as f:
+            f.write(str(global_metrics))
     
 
+"""
+client_metrics format:
+
+[
+    (
+        {
+            "anomaly_accuracy": 0.94,
+            "disease_accuracy": 0.91,
+            "disease_f1": 0.90
+        },
+
+        n1
+    ),
+
+    (
+        {
+            "anomaly_accuracy": 0.95,
+            "disease_accuracy": 0.93,
+            "disease_f1": 0.92
+        },
+
+        n2
+    )
+]
+"""
+
+    
 @app.get("/evaluate")
 async def get_global_eval():
     global global_metrics
@@ -183,12 +219,14 @@ async def eval_upload(
     samples:float = Body(...),
     local_metrics: dict = Body(...),
 ):
-    global client_evals,clients
+    global client_evals,clients,rounds_left
     if client_id not in clients or clients[client_id] is False:
         return {"error": "Invalid client ID. Please connect to the server first to get a valid ID."}
-    client_evals.append((local_metrics,samples))
+    if rounds_left > 0:
+        return {"message": "Round not complete yet. Please wait for the next round to finish."}
+    client_metrics.append((local_metrics,samples))
     log_upload(client_id, "local_metrics", samples)
-    print(f"Received eval update from {client_id}. clients in queue: {len(client_evals)}")
+    print(f"Received eval update from {client_id}. clients in queue: {len(client_metrics)}")
 
     background_tasks.add_task(evaluate)
     return {"message": "uploaded successfully"}

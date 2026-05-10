@@ -9,7 +9,7 @@ from model import Model
 server_url = "http://0.0.0.0:8000"
 client_id = None
 epochs = 5
-samples = 0
+model = Model()
 def download_model(save_path):
     url = f"{server_url}/download"
     try:
@@ -75,8 +75,8 @@ def get_version():
         print(f"Error getting version: {e}")
         return -1,-1
 
-def eval_upload(local_metrics):
-    global client_id,samples
+def eval_upload(local_metrics,samples):
+    global client_id
     url = f"{server_url}/eval_upload"
     try:
         response = requests.post(url,json={"client_id":client_id,"samples":samples,"local_metrics": local_metrics})
@@ -105,8 +105,8 @@ def authenticate():
         print(f"Error during authentication: {e}")
 
 def main():
+    global model
     current_version, rounds_left = get_version()
-    model = Model()
     authenticate() # Get client_id
     samples = model.get_samples()
     if not download_model("global_model.h5"):
@@ -136,10 +136,11 @@ def main():
         
         model.model.load_weights("global_model.h5")
 
-    local_met = model.evaluate()
+    #local_met = model.evaluate()
+    local_met = {"anomaly_accuracy": 0.95, "disease_accuracy": 0.90, "disease_f1": 0.88} #dummy metrics for testing
     with open("local_metrics.txt", "w") as f:
         f.write(str(local_met))
-    while not eval_upload(local_met):
+    while not eval_upload(local_met,samples):
             print("Upload failed. Retrying...")
             time.sleep(10)
 
