@@ -55,5 +55,9 @@ python3 main.py -d data/dataset.npz
 
 ```bash
 pip install -r requirements.txt
-fastapi run main.py > server_log.txt 2>&1 &
+fastapi run main.py
+```
+or 
+```bash
+nohup python -m uvicorn main:app --host 0.0.0.0 --port 8000 > server_log.txt 2>&1 &
 ```

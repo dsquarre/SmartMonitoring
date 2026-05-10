@@ -15,6 +15,7 @@ server_url = "http://0.0.0.0:8000"
 client_id = None
 epochs = 5
 model = Model(args.dataset)
+
 def download_model(save_path):
     url = f"{server_url}/download"
     try:

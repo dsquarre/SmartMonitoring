@@ -157,11 +157,13 @@ async def get_global_eval():
 @app.get("/version")
 async def version():
     global current_round, rounds_left
+    print(f"Current round: {current_round}, Rounds left: {rounds_left}")
     return {"available_download": current_round-1, "rounds_left": rounds_left}
 
 @app.get("/done")
 async def finished():
     global done
+    print(done)
     return {"message":done}
 
 @app.get("/download")
@@ -184,6 +186,7 @@ async def root():
     #have to add authentication
     id = generate_id()
     clients[id] = True
+    print(f"Client {id} connected. Total clients: {len(clients)}")
     return {"your_id": id}
 
 
