@@ -1,13 +1,13 @@
-## Smart Monitoring System
+# Smart Monitoring System
 
-# Federated Learning System for Healthcare monitoring system.
+## Federated Learning System for Healthcare monitoring system.
 
 Repository is divided into two dirs
 - client/
 - server/
 
 
-# Client Side 
+## Client Side 
 
 - Clients control the flow of execution of code. Each client that wants to participate in the system first authenticates itself to get a client_id.
 - Using this Id it can upload its local training weights and evaluation report. 
@@ -19,7 +19,7 @@ Repository is divided into two dirs
 - Fetches the global metrics and logs it.
 
 
-# Server Side
+## Server Side
 
 - Server is deployed on AWS cloud and runs on a uvicorn server which constantly waits for users to authenticate and upload their weights
 - A round consists of N>=3 clients uploading their weights (it starts a background check for aggregate function), after which FedAvg algorithm w_i_t+1 = sigma(t=1,n,(Ni*w_t/N)) is used to calculate global weights and saved in global_model_path and current_round is incremented.
@@ -28,7 +28,7 @@ Repository is divided into two dirs
 - Clients regularily ping the server/done and if its true, they download the global metrics.
 
 
-# TODOs
+## TODOs
 - Authentication 
 - Error and edge cases handling
 - Testing on AWS server and online clients to check convergence 
