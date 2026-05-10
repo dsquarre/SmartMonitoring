@@ -136,8 +136,8 @@ def main():
         
         model.model.load_weights("global_model.h5")
 
-    #local_met = model.evaluate()
-    local_met = {"anomaly_accuracy": 0.95, "disease_accuracy": 0.90, "disease_f1": 0.88} #dummy metrics for testing
+    local_met = model.evaluate()
+    #local_met = {"anomaly_accuracy": 0.95, "disease_accuracy": 0.90, "disease_f1": 0.88} #dummy metrics for testing
     with open("local_metrics.txt", "w") as f:
         f.write(str(local_met))
     while not eval_upload(local_met,samples):

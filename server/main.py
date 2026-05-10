@@ -14,7 +14,7 @@ import numpy as np
 
 
 #vars
-rounds_left = 0
+rounds_left = 5
 clients = {}
 model = Model()
 app = FastAPI()
