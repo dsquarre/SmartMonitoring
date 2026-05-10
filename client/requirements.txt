@@ -1,4 +1,4 @@
 tensorflow
 requests
 numpy
-sklearn
+scikit-learn

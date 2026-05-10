@@ -60,4 +60,6 @@ fastapi run main.py
 or 
 ```bash
 nohup python -m uvicorn main:app --host 0.0.0.0 --port 8000 > server_log.txt 2>&1 &
+#to kill
+#sudo fuser -k 8000/tcp
 ```
