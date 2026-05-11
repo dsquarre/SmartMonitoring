@@ -1,5 +1,6 @@
 fastapi
 uvicorn
-python-multipart==0.0.9
+python-multipart
 tensorflow
 numpy
+bcrypt

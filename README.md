@@ -2,9 +2,23 @@
 Sponsored by AWS Amazon
 - Compeletely abstracted code pipeline for Federated Learning
 
-Repository is divided into two dirs
-- client/
-- server/
+.
+├── client
+│   ├── dataset.npz
+│   ├── main.py
+│   ├── model.py
+│   ├── psswd.txt
+│   ├── requirements.txt
+│   └── url.txt
+│   
+├── fl.yaml
+├── LICENSE
+├── README.md
+└── server
+    ├── main.py
+    ├── model.py
+    ├── ps.dat
+    └── requirements.txt
 
 
 ## Client Side 
@@ -27,9 +41,22 @@ Repository is divided into two dirs
 - This is repeated until rounds_left becomes 0 after which clients start their local evaluation of the model and upload to the server(starting a background check for aggregate function). When N>=3 authenticated clients have uploaded evaluation metrics, FedAvg of client metrics is done and global_metrics is available to download by setting done=True.
 - Clients regularily ping the server/done and if its true, they download the global metrics.
 
+## FL.YAML
+
+- A template file for CloudFormation stack created in AWS
+- 1 Server and 3 clients
+- Almost everything is automated, just scp the dataset into each client
+- ssh inside each client to start Federated Learning System
+- Make sure the "ssh key" is replaced by actual ssh key obtained from terminal after doing 
+```bash
+ssh-keygen -t rsa -b 2048
+```
+- and replacing it with your key to be able to ssh into the ec2 instance.
+- The shell commands in UsesData take roughly 5 minutes to execute.
+- After 5 min, ssh into server and replace the ps.dat with actual hashed password you want to use, and ssh into clients to start the federated learning system.
+
 
 ## TODOs
-- Authentication 
 - Error and edge cases handling
 - Testing on AWS server and online clients to check convergence 
 
@@ -37,14 +64,14 @@ Repository is divided into two dirs
 
 ### Client
 - Model definition is as defined in model.py and can be changed keeping the essence of funtions same.
-- Upload the dataset and pass args to main.py; In our example we have preprocessed numpy arrays stored in data/dataset.npz
-- Set the configs like server url and epochs and run main.py
+- Upload the dataset and pass args to main.py; In our example we have preprocessed numpy arrays stored in dataset.npz
+- Set the configs like server url and password and epochs per round and run main.py
 
 ```bash
-mkdir data
-#copy the dataset.npz in data dir
+#copy the dataset.npz here
+#change password and url as required
 pip install -r requirements.txt
-python3 main.py -d data/dataset.npz
+python3 main.py -d dataset.npz
 ```
 
 ### Server
@@ -52,6 +79,7 @@ python3 main.py -d data/dataset.npz
 - set the configs like rounds_left (no of rounds)
 - run main.py through fastapi
 - logs will be saved in server_log.txt
+- store hashed password in ps.dat
 
 ```bash
 pip install -r requirements.txt
@@ -63,3 +91,4 @@ nohup python -m uvicorn main:app --host 0.0.0.0 --port 8000 > server_log.txt 2>&
 #to kill
 #sudo fuser -k 8000/tcp
 ```
+

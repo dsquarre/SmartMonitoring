@@ -10,10 +10,11 @@ import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument("-d","--dataset", type=str, help="Path to dataset.npz")
 args = parser.parse_args()
-
-server_url = "http://0.0.0.0:8000"
+server_url = None
+with open("url.txt", "r") as f:
+    server_url = f.read().strip()
 client_id = None
-epochs = 5
+epochs = 1
 model = Model(args.dataset)
 
 def download_model(save_path):
@@ -99,12 +100,18 @@ def eval_upload(local_metrics,samples):
 
 def authenticate():
     global client_id
+    with open("psswd.txt", "r") as f:
+        psswd = f.read().strip()
     url = f"{server_url}/"
     try:
-        response = requests.get(url)
+        response = requests.post(url,data=psswd)
         if response.status_code == 200:
             auth_info = response.json()
             client_id = auth_info.get("your_id", None)
+            if client_id is None:
+                print("Authentication failed: No client ID received.")
+                sys.exit(1)
+            print(f"Authenticated successfully. Client ID: {client_id}")
         else:
             print(f"Failed to authenticate: {response.status_code}")
     except Exception as e:
@@ -112,8 +119,9 @@ def authenticate():
 
 def main():
     global model
-    current_version, rounds_left = get_version()
+    print('starting client...')
     authenticate() # Get client_id
+    current_version, rounds_left = get_version()
     samples = model.get_samples()
     if not download_model("global_model.h5"):
         print("Could not download initial model. Using initialized weights.")

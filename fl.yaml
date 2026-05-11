@@ -1,0 +1,155 @@
+Resources:
+    SecurityGroup:
+        Type: AWS::EC2::SecurityGroup
+        Properties:
+            GroupDescription: Allow SSH and Uvicorn access
+            SecurityGroupIngress:
+                - IpProtocol: tcp
+                  FromPort: 22
+                  ToPort: 22
+                  CidrIp: 0.0.0.0/0
+                - IpProtocol: tcp
+                  FromPort: 8000
+                  ToPort: 8000
+                  CidrIp: 0.0.0.0/0
+    Server:
+        Type: AWS::EC2::Instance
+        Properties:
+            SecurityGroups:
+                - !Ref SecurityGroup
+            ImageId: ami-0388e3ada3d9812da
+            BlockDeviceMappings:
+                - DeviceName: /dev/sda1
+                  Ebs:
+                    VolumeSize: 20
+                    VolumeType: gp3
+                    DeleteOnTermination: true
+            InstanceType: t3.small
+            UserData: !Base64 |
+                #!/bin/bash
+                apt update -y
+                sudo apt install python3-pip python3-venv python3-dev -y
+                mkdir -p /home/ubuntu/.ssh
+                echo "ssh-rsa key" >> /home/ubuntu/.ssh/authorized_keys
+                chown -R ubuntu:ubuntu /home/ubuntu/.ssh
+                chmod 700 /home/ubuntu/.ssh
+                chmod 600 /home/ubuntu/.ssh/authorized_keys
+
+                cd /home/ubuntu/
+                git clone https://github.com/dsquarre/SmartMonitoring.git SmartMonitoring
+                chown -R ubuntu:ubuntu .
+                cd SmartMonitoring/server
+                python3 -m venv venv
+                venv/bin/pip3 install -r requirements.txt
+                nohup venv/bin/python3 -m uvicorn main:app --host 0.0.0.0 --port 8000 > server_log.txt 2>&1 &
+    Client1:
+        Type: AWS::EC2::Instance
+        Properties:
+            SecurityGroups:
+                - !Ref SecurityGroup
+            ImageId: ami-0388e3ada3d9812da
+            BlockDeviceMappings:
+                - DeviceName: /dev/sda1
+                  Ebs:
+                    VolumeSize: 30
+                    VolumeType: gp3
+                    DeleteOnTermination: true
+            InstanceType: t3.large
+            UserData:
+                Fn::Base64: !Sub |
+                    #!/bin/bash
+                    apt update -y
+                    sudo apt install python3-pip python3-venv python3-dev -y
+                    mkdir -p /home/ubuntu/.ssh
+                    echo "ssh-rsa key" >> /home/ubuntu/.ssh/authorized_keys
+                    chown -R ubuntu:ubuntu /home/ubuntu/.ssh
+                    chmod 700 /home/ubuntu/.ssh
+                    chmod 600 /home/ubuntu/.ssh/authorized_keys
+
+                    cd /home/ubuntu/
+                    git clone https://github.com/dsquarre/SmartMonitoring.git SmartMonitoring
+                    chown -R ubuntu:ubuntu .
+                    cd SmartMonitoring/client
+                    echo "rickroll" > psswd.txt
+                    echo "https://${Server.PublicIp}:8000" > url.txt
+                    python3 -m venv venv
+                    venv/bin/pip3 install -r requirements.txt
+    Client2:
+        Type: AWS::EC2::Instance
+        Properties:
+            SecurityGroups:
+                - !Ref SecurityGroup
+            ImageId: ami-0388e3ada3d9812da
+            BlockDeviceMappings:
+                - DeviceName: /dev/sda1
+                  Ebs:
+                    VolumeSize: 30
+                    VolumeType: gp3
+                    DeleteOnTermination: true
+            InstanceType: t3.large
+            UserData:
+                Fn::Base64: !Sub |
+                    #!/bin/bash
+                    apt update -y
+                    sudo apt install python3-pip python3-venv python3-dev -y
+                    mkdir -p /home/ubuntu/.ssh
+                    echo "ssh-rsa key" >> /home/ubuntu/.ssh/authorized_keys
+                    chown -R ubuntu:ubuntu /home/ubuntu/.ssh
+                    chmod 700 /home/ubuntu/.ssh
+                    chmod 600 /home/ubuntu/.ssh/authorized_keys
+
+                    cd /home/ubuntu/
+                    git clone https://github.com/dsquarre/SmartMonitoring.git SmartMonitoring
+                    chown -R ubuntu:ubuntu .
+                    cd SmartMonitoring/client
+                    echo "rickroll" > psswd.txt
+                    echo "https://${Server.PublicIp}:8000" > url.txt
+                    python3 -m venv venv
+                    venv/bin/pip3 install -r requirements.txt
+    Client3:
+        Type: AWS::EC2::Instance
+        Properties:
+            SecurityGroups:
+                - !Ref SecurityGroup
+            ImageId: ami-0388e3ada3d9812da
+            BlockDeviceMappings:
+                - DeviceName: /dev/sda1
+                  Ebs:
+                    VolumeSize: 30
+                    VolumeType: gp3
+                    DeleteOnTermination: true
+            InstanceType: t3.large
+            UserData:
+                Fn::Base64: !Sub |
+                    #!/bin/bash
+                    apt update -y
+                    sudo apt install python3-pip python3-venv python3-dev -y
+                    mkdir -p /home/ubuntu/.ssh
+                    echo "ssh-rsa key" >> /home/ubuntu/.ssh/authorized_keys
+                    chown -R ubuntu:ubuntu /home/ubuntu/.ssh
+                    chmod 700 /home/ubuntu/.ssh
+                    chmod 600 /home/ubuntu/.ssh/authorized_keys
+
+                    cd /home/ubuntu/
+                    git clone https://github.com/dsquarre/SmartMonitoring.git SmartMonitoring
+                    chown -R ubuntu:ubuntu .
+                    cd SmartMonitoring/client
+                    echo "rickroll" > psswd.txt
+                    echo "https://${Server.PublicIp}:8000" > url.txt
+                    python3 -m venv venv
+                    venv/bin/pip3 install -r requirements.txt
+                    #venv/bin/python3 main.py -d dataset.npz
+                    #not having the dataset public is the only thing stopping me from making it fully autonomous
+Outputs:
+  ServerIP:
+    Value: !GetAtt Server.PublicIp
+    Description: Public IP address of the Server
+  Client1IP:
+    Value: !GetAtt Client1.PublicIp
+    Description: Public IP address of the Client1
+  Client2IP:
+    Value: !GetAtt Client2.PublicIp
+    Description: Public IP address of the Client2
+  Client3IP:
+    Value: !GetAtt Client3.PublicIp
+    Description: Public IP address of the Client3

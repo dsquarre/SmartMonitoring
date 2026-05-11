@@ -11,7 +11,7 @@ from model import Model
 from collections import deque
 import random
 import numpy as np
-
+import bcrypt
 
 #vars
 rounds_left = 5
@@ -147,7 +147,13 @@ client_metrics format:
     )
 ]
 """
-
+def authenticate(password):
+    with open("ps.dat", "rb") as f:
+        stored_hash = f.read()
+    if bcrypt.checkpw(password.encode('utf-8'), stored_hash):
+            return True
+    else:
+        return False
     
 @app.get("/evaluate")
 async def get_global_eval():
@@ -180,10 +186,12 @@ async def get_global_model():
         headers={"Global-Round": str(current_round - 1)}
     )
 
-@app.get("/")
-async def root():
+@app.post("/")
+async def root(psswd: str = Body(...),):
+    if not psswd or not authenticate(psswd):
+        print('invalid password attempt')
+        return {"message": "Welcome to the Federated Learning Server."}
     global done
-    #have to add authentication
     id = generate_id()
     clients[id] = True
     print(f"Client {id} connected. Total clients: {len(clients)}")
@@ -233,3 +241,4 @@ async def eval_upload(
 
     background_tasks.add_task(evaluate)
     return {"message": "uploaded successfully"}
+
