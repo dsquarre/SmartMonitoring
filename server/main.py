@@ -11,7 +11,7 @@ from model import Model
 from collections import deque
 import random
 import numpy as np
-import bcrypt
+
 
 #vars
 rounds_left = 5
@@ -23,6 +23,8 @@ client_queues = deque()
 client_metrics = deque()
 done = False
 global_metrics = {}
+TOTAL_CLIENTS = 10
+
 
 os.makedirs('uploads', exist_ok=True)
 if not os.path.exists('upload_log.csv'):
@@ -87,23 +89,38 @@ def aggregate(client_data,global_model_path):
 
 
 def aggregate_models():
-    global client_queues, current_round,rounds_left
-    if len(client_queues) > 2:
+
+    global client_queues, current_round, rounds_left
+    print(f"[SERVER] Queue size: {len(client_queues)}")
+    if len(client_queues) >= TOTAL_CLIENTS:
+        print("[SERVER] Starting aggregation...")
         client_data = []
         files_to_delete = []
-        for i in range(3):
-            file_info,samples = client_queues.popleft()
+        
+        for i in range(10):
+            file_info, samples = client_queues.popleft()
+            print(f"[SERVER] Using {file_info}")
             client_data.append((file_info, samples))
             files_to_delete.append(file_info)
-        files_to_delete.append(f"global_model_{current_round - 1}.h5")  
-        aggregate(client_data, f"global_model_{current_round}.h5")
+        try:
+            aggregate(client_data,f"global_model_{current_round}.h5")
+            print(f"[SERVER] Aggregation SUCCESS")
+
+        except Exception as e:
+            print(f"[SERVER] Aggregation FAILED: {e}")
+            return
+
         for path in files_to_delete:
             if os.path.exists(path):
                 os.remove(path)
-        
-        print(f"Round {current_round} complete.")
+
+        print(f"[SERVER] Round {current_round} complete.")
         current_round += 1
         rounds_left -= 1
+        if rounds_left == 0:
+            import shutil
+            shutil.copy(f"global_model_{current_round - 1}.h5","final_global_model.h5")
+            print("\nFINAL GLOBAL MODEL SAVED\n")
 
 def evaluate():
     global client_metrics,done,global_metrics
@@ -147,13 +164,7 @@ client_metrics format:
     )
 ]
 """
-def authenticate(password):
-    with open("ps.dat", "rb") as f:
-        stored_hash = f.read()
-    if bcrypt.checkpw(password.encode('utf-8'), stored_hash):
-            return True
-    else:
-        return False
+
     
 @app.get("/evaluate")
 async def get_global_eval():
@@ -174,8 +185,14 @@ async def finished():
 
 @app.get("/download")
 async def get_global_model():
-    global current_round
-    model_path = f"global_model_{current_round - 1}.h5"
+    global current_round, rounds_left
+    if rounds_left == 0:
+
+        model_path = "final_global_model.h5"
+
+    else:
+
+        model_path = f"global_model_{current_round - 1}.h5"
     
     if not os.path.exists(model_path):
         raise HTTPException(status_code=404, detail=f"Global model for round {current_round - 1} not found.")
@@ -186,12 +203,10 @@ async def get_global_model():
         headers={"Global-Round": str(current_round - 1)}
     )
 
-@app.post("/")
-async def root(psswd: str = Body(...),):
-    if not psswd or not authenticate(psswd):
-        print('invalid password attempt')
-        return {"message": "Welcome to the Federated Learning Server."}
+@app.get("/")
+async def root():
     global done
+    #have to add authentication
     id = generate_id()
     clients[id] = True
     print(f"Client {id} connected. Total clients: {len(clients)}")
@@ -241,4 +256,3 @@ async def eval_upload(
 
     background_tasks.add_task(evaluate)
     return {"message": "uploaded successfully"}
-

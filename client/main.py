@@ -7,15 +7,25 @@ import collections
 from model import Model
 import argparse
 
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+
 parser = argparse.ArgumentParser()
 parser.add_argument("-d","--dataset", type=str, help="Path to dataset.npz")
-args = parser.parse_args()
+
+args = None
+model = None
+
+if __name__ == "__main__":
+    args = parser.parse_args()
+    if args.dataset is not None:
+        model = Model(args.dataset)
+
 server_url = None
 with open("url.txt", "r") as f:
     server_url = f.read().strip()
 client_id = None
 epochs = 1
-model = Model(args.dataset)
+
 
 def download_model(save_path):
     url = f"{server_url}/download"
@@ -104,7 +114,7 @@ def authenticate():
         psswd = f.read().strip()
     url = f"{server_url}/"
     try:
-        response = requests.post(url,data=psswd)
+        response = requests.get(url,data=psswd)
         if response.status_code == 200:
             auth_info = response.json()
             client_id = auth_info.get("your_id", None)
@@ -117,59 +127,125 @@ def authenticate():
     except Exception as e:
         print(f"Error during authentication: {e}")
 
-def main():
-    global model
-    print('starting client...')
-    authenticate() # Get client_id
-    current_version, rounds_left = get_version()
+
+def evaluate_final_model():
+
+    global model, client_id
+
+    print("\nFINAL EVALUATION CLIENT\n")
+
+    authenticate()
     samples = model.get_samples()
-    if not download_model("global_model.h5"):
-        print("Could not download initial model. Using initialized weights.")
-    else:
-        model.model.load_weights("global_model.h5")
+    global_model_path = f"final_model_{client_id}.h5"
+    downloaded = False
 
-    while rounds_left > 0:
-        model.train(epochs)
-        model.model.save("client_model.h5")
-        while not upload_model("client_model.h5", samples):
-            print("Upload failed. Retrying...")
-            time.sleep(10)
+    while not downloaded:
+        downloaded = download_model(global_model_path)
+        if not downloaded:
+            time.sleep(5)
 
-        #wait for next version
-        v,rounds_left = get_version()
-        while v == current_version:
-            time.sleep(10)
-            v,rounds_left = get_version()
-        current_version = v
-        
-        downloaded = False
-        while not downloaded:
-            downloaded = download_model("global_model.h5")
-            if not downloaded:
-                time.sleep(10)
-        
-        model.model.load_weights("global_model.h5")
+    model.model.load_weights(global_model_path)
+    print("Final global model loaded.")
 
     local_met = model.evaluate()
-    #local_met = {"anomaly_accuracy": 0.95, "disease_accuracy": 0.90, "disease_f1": 0.88} #dummy metrics for testing
-    with open("local_metrics.txt", "w") as f:
-        f.write(str(local_met))
-    while not eval_upload(local_met,samples):
-            print("Upload failed. Retrying...")
-            time.sleep(10)
+    print(f"Local Metrics: {local_met}")
+    uploaded = False
+    
+    while not uploaded:
+        uploaded = eval_upload(local_met,samples)
+        if not uploaded:
+            time.sleep(5)
+
+    print("Metrics uploaded.")
 
     done = False
     while not done:
         response = requests.get(f"{server_url}/done")
-        if response.status_code == 200:
-            done = response.json().get("message", False)
-        else:
-            print(f"Failed to check completion status: {response.status_code}")
-        time.sleep(10)
-    
-    global_met = global_metrics()
-    with open("global_metrics.txt", "w") as f:
-        f.write(str(global_met))
 
+        if response.status_code == 200:
+            done = response.json().get(
+                "message",
+                False
+            )
+        time.sleep(5)
+
+    metrics = global_metrics()
+    print("\nGLOBAL METRICS")
+    print(metrics)
+
+def main():
+    global model, client_id
+    print("starting client...")
+    authenticate()
+    current_version, rounds_left = get_version()
+
+    print(f"Global Version: {current_version}")
+    print(f"Rounds Left: {rounds_left}")
+
+    if rounds_left <= 0:
+        print("Training complete.")
+        return
+
+    samples = model.get_samples()
+    global_model_path = f"global_model_{client_id}.h5"
+    client_model_path = f"client_model_{client_id}.h5"
+
+    #global model
+    downloaded = False
+    while not downloaded:
+        downloaded = download_model(global_model_path)
+
+        if not downloaded:
+            print("Waiting for global model...")
+            time.sleep(5)
+
+    model.model.load_weights(global_model_path)
+    print("Global model loaded.")
+
+    model.train(epochs)
+    model.model.save(client_model_path)
+
+    uploaded = False
+    while not uploaded:
+        uploaded = upload_model(client_model_path,samples)
+        if not uploaded:
+            print("Upload failed.")
+            time.sleep(5)
+
+    print(f"Client {client_id} uploaded successfully.")
+
+    import gc
+    tf.keras.backend.clear_session()
+    gc.collect()
+    
+    if os.path.exists(client_model_path):
+        os.remove(client_model_path)
+    if os.path.exists(global_model_path):
+        os.remove(global_model_path)
+
+    print(f"Client {client_id} finished.")
+
+class Client:
+
+    def __init__(self, dataset_path):
+
+        self.dataset_path = dataset_path
+
+    def start(self):
+
+        global model
+
+        model = Model(self.dataset_path)
+
+        main()
+        
+    def evaluate(self):
+
+        global model
+
+        model = Model(self.dataset_path)
+
+        evaluate_final_model()
+        
 if __name__ == "__main__":
     main()
