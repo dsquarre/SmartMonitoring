@@ -15,7 +15,7 @@ import bcrypt
 
 #vars
 rounds_left = 1
-clients = {}
+clients = set()
 model = Model()
 app = FastAPI()
 current_round = 0
@@ -199,7 +199,7 @@ async def root(psswd: str = Body(...),):
         return {"message": "Welcome to the Federated Learning Server."}
     global done
     id = generate_id()
-    clients[id] = True
+    clients.add(id)
     print(f"Client {id} connected. Total clients: {len(clients)}")
     return {"your_id": id}
 
@@ -217,8 +217,8 @@ async def upload_local_model(
     if client_round<current_round:
         print('stale update dropped')
         return {"message":"stale update, file dropped"}
-    if client_id not in clients or clients[client_id] is False:
-        print('invalid client')
+    if client_id not in clients:
+        print('client id not in the authenticated clients')
         return {"error": "Invalid client ID. Please connect to the server first to get a valid ID."}
 
     file_path = f"models/client_{client_id}_model_{next_round}.keras"
@@ -240,7 +240,7 @@ async def eval_upload(
     local_metrics: dict = Body(...),
 ):
     global clients,rounds_left,client_metrics
-    if client_id not in clients or clients[client_id] is False:
+    if client_id not in clients:
         return {"error": "Invalid client ID. Please connect to the server first to get a valid ID."}
     if rounds_left > 0:
         return {"message": "Round not complete yet. Please wait for the next round to finish."}
