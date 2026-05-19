@@ -14,26 +14,29 @@ import numpy as np
 import bcrypt
 
 #vars
-rounds_left = 5
+rounds_left = 1
 clients = {}
 model = Model()
 app = FastAPI()
-current_round = 1
+current_round = 0
+next_round = 1
 client_queues = deque()
 client_metrics = deque()
 done = False
 global_metrics = {}
 
 os.makedirs('uploads', exist_ok=True)
+os.makedirs('models', exist_ok=True)
+
 if not os.path.exists('upload_log.csv'):
     with open('upload_log.csv', 'w', newline='') as f:
         writer = csv.writer(f)
         writer.writerow(["timestamp", "client_id", "filename", "weight", "round"])
 
-if not os.path.exists("global_model_0.h5"):
+if not os.path.exists("models/global_model_0.keras"):
     model = Model()
-    model.model.save("global_model_0.h5")
-    print(f"Created initial global model at global_model_0.h5")
+    model.model.save("models/global_model_0.keras")
+    print(f"Created initial global model at global_model_0.keras")
 
 def generate_id():
     a = 'abcdefghijklmnopqrstuvwxyz!@#$%&ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
@@ -48,7 +51,7 @@ def generate_id():
 def log_upload(client_id, filename, weight):
     with open('upload_log.csv', 'a', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow([datetime.now().isoformat(), client_id, filename, weight, current_round])
+        writer.writerow([datetime.now().isoformat(), client_id, filename, weight, next_round])
 
 def aggregate(client_data,global_model_path):
     global_model = Model()
@@ -87,28 +90,31 @@ def aggregate(client_data,global_model_path):
 
 
 def aggregate_models():
-    global client_queues, current_round,rounds_left
+    global client_queues,current_round, next_round,rounds_left,client_metrics
+    client_metrics.clear()
     if len(client_queues) > 2:
+        print('starting aggregation')
+        current_round += 1
         client_data = []
         files_to_delete = []
-        for i in range(3):
+        for i in range(len(client_queues)):
             file_info,samples = client_queues.popleft()
             client_data.append((file_info, samples))
             files_to_delete.append(file_info)
-        files_to_delete.append(f"global_model_{current_round - 1}.h5")  
-        aggregate(client_data, f"global_model_{current_round}.h5")
+        files_to_delete.append(f"models/global_model_{next_round - 1}.keras")  
+        aggregate(client_data, f"models/global_model_{next_round}.keras")
         for path in files_to_delete:
             if os.path.exists(path):
                 os.remove(path)
-        
-        print(f"Round {current_round} complete.")
-        current_round += 1
+        client_queues.clear()
+        print(f"Round {next_round} complete.")
         rounds_left -= 1
+        next_round+=1
 
 def evaluate():
     global client_metrics,done,global_metrics
-    print(client_metrics)
-    #client is a deque of tuple (local_metrics,samples)->(dict,int)
+    #print(client_metrics)
+    #client_metrics is a deque of tuple (local_metrics,samples)->(dict,int)
     if len(client_metrics)>2:
         total_samples = sum(samples for _, samples in client_metrics)
         metric_names = client_metrics[0][0].keys()
@@ -120,7 +126,7 @@ def evaluate():
         done = True
         with open("global_metrics.txt", "w") as f:
             f.write(str(global_metrics))
-    
+        client_metrics.clear()
 
 """
 client_metrics format:
@@ -162,9 +168,9 @@ async def get_global_eval():
 
 @app.get("/version")
 async def version():
-    global current_round, rounds_left
-    print(f"Current round: {current_round}, Rounds left: {rounds_left}")
-    return {"available_download": current_round-1, "rounds_left": rounds_left}
+    global next_round, rounds_left
+    print(f"Global round: {next_round}, Rounds left: {rounds_left}")
+    return {"global_round": next_round, "rounds_left": rounds_left}
 
 @app.get("/done")
 async def finished():
@@ -174,16 +180,16 @@ async def finished():
 
 @app.get("/download")
 async def get_global_model():
-    global current_round
-    model_path = f"global_model_{current_round - 1}.h5"
+    global next_round
+    model_path = f"models/global_model_{next_round - 1}.keras"
     
     if not os.path.exists(model_path):
-        raise HTTPException(status_code=404, detail=f"Global model for round {current_round - 1} not found.")
+        raise HTTPException(status_code=404, detail=f"Global model for round {next_round - 1} not found.")
     
     return FileResponse(
         path=model_path, 
         filename=model_path,
-        headers={"Global-Round": str(current_round - 1)}
+        headers={"Global-Round": str(next_round - 1)}
     )
 
 @app.post("/")
@@ -203,14 +209,19 @@ async def root(psswd: str = Body(...),):
 async def upload_local_model(
     background_tasks: BackgroundTasks,
     client_id: str = Form(...), 
+    client_round:int = Body(...),
     samples: float = Form(1.0),
     file: UploadFile = File(...),
 ):
-    global current_round,client_queues,clients
+    global next_round,client_queues,clients,current_round
+    if client_round<current_round:
+        print('stale update dropped')
+        return {"message":"stale update, file dropped"}
     if client_id not in clients or clients[client_id] is False:
+        print('invalid client')
         return {"error": "Invalid client ID. Please connect to the server first to get a valid ID."}
 
-    filename = f"client_{client_id}_model_{current_round}.h5"
+    filename = f"models/client_{client_id}_model_{next_round}.keras"
     file_path = os.path.join("uploads", filename)
     
     with open(file_path, "wb") as buffer:
@@ -230,7 +241,7 @@ async def eval_upload(
     samples:float = Body(...),
     local_metrics: dict = Body(...),
 ):
-    global client_evals,clients,rounds_left
+    global clients,rounds_left,client_metrics
     if client_id not in clients or clients[client_id] is False:
         return {"error": "Invalid client ID. Please connect to the server first to get a valid ID."}
     if rounds_left > 0:

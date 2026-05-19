@@ -10,48 +10,77 @@ import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument("-d","--dataset", type=str, help="Path to dataset.npz")
 args = parser.parse_args()
+
 server_url = None
 with open("url.txt", "r") as f:
     server_url = f.read().strip()
-client_id = None
-epochs = 1
-model = Model(args.dataset)
 
-def download_model(save_path):
-    url = f"{server_url}/download"
-    try:
-        response = requests.get(url)
-        if response.status_code == 200:
-            with open(save_path, 'wb') as f:
-                f.write(response.content)
-            print(f"Global model downloaded successfully.")
-            return True
-        else:
-            print(f"Failed to download model: {response.status_code}")
+os.makedirs('models', exist_ok=True)
+os.makedirs('metrics', exist_ok=True)
+
+#client specific methods here
+class Client:
+    def __init__(self,filepath):
+        self.client_id = None
+        self.authenticate()
+        self.current_round = -1
+        self.model = Model(filepath)
+        self.samples = self.model.get_samples()
+
+    def upload_model(self,file_path):
+        url = f"{server_url}/upload"
+        print(f"client round: {self.current_round}")
+        try:
+            with open(file_path, 'rb') as f:
+                files = {'file': f}
+                data = {'client_id': self.client_id,'client_round':self.current_round, 'samples': self.samples} 
+                response = requests.post(url, files=files, data=data)
+            
+            if response.status_code == 200:
+                print("Model uploaded successfully.")
+                return True
+            else:
+                print(f"Failed to upload model: {response.status_code} - {response.text}")
+                return False
+        except Exception as e:
+            print(f"Error uploading model: {e}")
             return False
-    except Exception as e:
-        print(f"Error downloading model: {e}")
-        return False
 
-
-def upload_model(file_path, samples):
-    global client_id
-    url = f"{server_url}/upload"
-    try:
-        with open(file_path, 'rb') as f:
-            files = {'file': f}
-            data = {'client_id': client_id, 'samples': samples} 
-            response = requests.post(url, files=files, data=data)
-        
-        if response.status_code == 200:
-            print("Model uploaded successfully.")
-            return True
-        else:
-            print(f"Failed to upload model: {response.status_code} - {response.text}")
+    def eval_upload(self,local_metrics):
+        url = f"{server_url}/eval_upload"
+        try:
+            response = requests.post(url,json={"client_id":self.client_id,"samples":self.samples,"local_metrics": local_metrics})
+            if response.status_code == 200:
+                res = response.json()
+                print(res.get("message",""))
+                return True
+            else:
+                print(f"Failed to upload local_metrics: {response.status_code}")
+                return False
+        except Exception as e:
+            print(f"Error uploading local metrics: {e}")
             return False
-    except Exception as e:
-        print(f"Error uploading model: {e}")
-        return False
+
+    def authenticate(self):
+        with open("psswd.txt", "r") as f:
+            psswd = f.read().strip()
+        url = f"{server_url}/"
+        try:
+            response = requests.post(url,data=psswd)
+            if response.status_code == 200:
+                auth_info = response.json()
+                self.client_id = auth_info.get("your_id", None)
+                if self.client_id is None:
+                    print("Authentication failed: No client ID received.")
+                    sys.exit(1)
+                print(f"Authenticated successfully. Client ID: {self.client_id}")
+            else:
+                print(f"Failed to authenticate: {response.status_code}")
+        except Exception as e:
+            print(f"Error during authentication: {e}")
+
+
+#methods common to all clients here
 
 def global_metrics():
     url = f"{server_url}/evaluate"
@@ -74,7 +103,7 @@ def get_version():
         response = requests.get(url)
         if response.status_code == 200:
             version_info = response.json()
-            return version_info.get("available_download", 0),version_info.get("rounds_left",0)
+            return version_info.get("global_round", 0),version_info.get("rounds_left",0)
         else:
             print(f"Failed to get version: {response.status_code}")
             return -1,-1
@@ -82,79 +111,71 @@ def get_version():
         print(f"Error getting version: {e}")
         return -1,-1
 
-def eval_upload(local_metrics,samples):
-    global client_id
-    url = f"{server_url}/eval_upload"
+def download_model(save_path):
+    url = f"{server_url}/download"
     try:
-        response = requests.post(url,json={"client_id":client_id,"samples":samples,"local_metrics": local_metrics})
+        response = requests.get(url)
         if response.status_code == 200:
-            res = response.json()
-            print(res.get("message",""))
+            with open(save_path, 'wb') as f:
+                f.write(response.content)
+            print(f"Global model downloaded successfully.")
             return True
         else:
-            print(f"Failed to upload local_metrics: {response.status_code}")
+            print(f"Failed to download model: {response.status_code}")
             return False
     except Exception as e:
-        print(f"Error uploading local metrics: {e}")
+        print(f"Error downloading model: {e}")
         return False
 
-def authenticate():
-    global client_id
-    with open("psswd.txt", "r") as f:
-        psswd = f.read().strip()
-    url = f"{server_url}/"
-    try:
-        response = requests.post(url,data=psswd)
-        if response.status_code == 200:
-            auth_info = response.json()
-            client_id = auth_info.get("your_id", None)
-            if client_id is None:
-                print("Authentication failed: No client ID received.")
-                sys.exit(1)
-            print(f"Authenticated successfully. Client ID: {client_id}")
+
+def simulate(clients):
+    for i in range(len(clients)): #no of sequential clients
+        client = clients[i]
+        global_round, rounds_left = get_version()
+        if client.current_round<0:
+            client.current_round = global_round-1
         else:
-            print(f"Failed to authenticate: {response.status_code}")
-    except Exception as e:
-        print(f"Error during authentication: {e}")
+            while global_round-1<client.current_round:
+                print('waiting for latest model')
+                time.sleep(10)
+                global_round, rounds_left = get_version()
+        if not download_model("models/global_model.keras"):
+            print("Could not download global model, network error")
+            sys.exit(1)
+        else:
+            client.model.model.load_weights("models/global_model.keras")
+
+        if rounds_left > 0:
+            client.model.train(epochs=1)
+            client.current_round+=1
+            client.model.model.save(f"models/client{i}_model.keras")
+            while not client.upload_model(f"models/client{i}_model.keras"):
+                print("Upload failed. Retrying...")
+                time.sleep(10)
+        else:
+            print(f'rounds left : {rounds_left}')
+            return False
+    return True
+
 
 def main():
-    global model
-    print('starting client...')
-    authenticate() # Get client_id
-    current_version, rounds_left = get_version()
-    samples = model.get_samples()
-    if not download_model("global_model.h5"):
-        print("Could not download initial model. Using initialized weights.")
-    else:
-        model.model.load_weights("global_model.h5")
-
-    while rounds_left > 0:
-        model.train(epochs)
-        model.model.save("client_model.h5")
-        while not upload_model("client_model.h5", samples):
-            print("Upload failed. Retrying...")
-            time.sleep(10)
-
-        #wait for next version
-        v,rounds_left = get_version()
-        while v == current_version:
-            time.sleep(10)
-            v,rounds_left = get_version()
-        current_version = v
-        
-        downloaded = False
-        while not downloaded:
-            downloaded = download_model("global_model.h5")
-            if not downloaded:
-                time.sleep(10)
-        
-        model.model.load_weights("global_model.h5")
-
-    local_met = model.evaluate()
-    #local_met = {"anomaly_accuracy": 0.95, "disease_accuracy": 0.90, "disease_f1": 0.88} #dummy metrics for testing
-    with open("local_metrics.txt", "w") as f:
-        f.write(str(local_met))
-    while not eval_upload(local_met,samples):
+    clients = []
+    n = 3
+    for i in range(n): #no of sequential clients
+        path = args.dataset + f"{i}.npz"
+        client = Client(path)
+        clients.append(client)
+    
+    while simulate(clients):
+        print("round done")
+    for i in range(n):
+        client = clients[i]
+        local_met = client.model.evaluate()
+        #dummy metrics for testing
+        #local_met = {"anomaly_accuracy": 0.95, "disease_accuracy": 0.90, "disease_f1": 0.88}
+        with open(f"metrics/local_metrics_client{i}.txt", "w") as f:
+            f.write(str(local_met))
+        while not client.eval_upload(local_met):
             print("Upload failed. Retrying...")
             time.sleep(10)
 
@@ -165,10 +186,11 @@ def main():
             done = response.json().get("message", False)
         else:
             print(f"Failed to check completion status: {response.status_code}")
+        print('global metrics not available yet')
         time.sleep(10)
     
     global_met = global_metrics()
-    with open("global_metrics.txt", "w") as f:
+    with open("metrics/global_metrics.txt", "w") as f:
         f.write(str(global_met))
 
 if __name__ == "__main__":

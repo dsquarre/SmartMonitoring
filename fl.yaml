@@ -24,7 +24,7 @@ Resources:
                     VolumeSize: 20
                     VolumeType: gp3
                     DeleteOnTermination: true
-            InstanceType: t3.small
+            InstanceType: t3.medium
             UserData: !Base64 |
                 #!/bin/bash
                 apt update -y
@@ -51,10 +51,10 @@ Resources:
             BlockDeviceMappings:
                 - DeviceName: /dev/sda1
                   Ebs:
-                    VolumeSize: 30
+                    VolumeSize: 40
                     VolumeType: gp3
                     DeleteOnTermination: true
-            InstanceType: t3.large
+            InstanceType: t3.xlarge
             UserData:
                 Fn::Base64: !Sub |
                     #!/bin/bash
@@ -83,10 +83,10 @@ Resources:
             BlockDeviceMappings:
                 - DeviceName: /dev/sda1
                   Ebs:
-                    VolumeSize: 30
+                    VolumeSize: 40
                     VolumeType: gp3
                     DeleteOnTermination: true
-            InstanceType: t3.large
+            InstanceType: t3.xlarge
             UserData:
                 Fn::Base64: !Sub |
                     #!/bin/bash
@@ -106,40 +106,7 @@ Resources:
                     echo "https://${Server.PublicIp}:8000" > url.txt
                     python3 -m venv venv
                     venv/bin/pip3 install -r requirements.txt
-    Client3:
-        Type: AWS::EC2::Instance
-        Properties:
-            SecurityGroups:
-                - !Ref SecurityGroup
-            ImageId: ami-0388e3ada3d9812da
-            BlockDeviceMappings:
-                - DeviceName: /dev/sda1
-                  Ebs:
-                    VolumeSize: 30
-                    VolumeType: gp3
-                    DeleteOnTermination: true
-            InstanceType: t3.large
-            UserData:
-                Fn::Base64: !Sub |
-                    #!/bin/bash
-                    apt update -y
-                    sudo apt install python3-pip python3-venv python3-dev -y
-                    mkdir -p /home/ubuntu/.ssh
-                    echo "ssh-rsa key" >> /home/ubuntu/.ssh/authorized_keys
-                    chown -R ubuntu:ubuntu /home/ubuntu/.ssh
-                    chmod 700 /home/ubuntu/.ssh
-                    chmod 600 /home/ubuntu/.ssh/authorized_keys
-
-                    cd /home/ubuntu/
-                    git clone https://github.com/dsquarre/SmartMonitoring.git SmartMonitoring
-                    chown -R ubuntu:ubuntu .
-                    cd SmartMonitoring/client
-                    echo "rickroll" > psswd.txt
-                    echo "https://${Server.PublicIp}:8000" > url.txt
-                    python3 -m venv venv
-                    venv/bin/pip3 install -r requirements.txt
-                    #venv/bin/python3 main.py -d dataset.npz
-                    #not having the dataset public is the only thing stopping me from making it fully autonomous
+    
 Outputs:
   ServerIP:
     Value: !GetAtt Server.PublicIp
@@ -150,6 +117,3 @@ Outputs:
   Client2IP:
     Value: !GetAtt Client2.PublicIp
     Description: Public IP address of the Client2
-  Client3IP:
-    Value: !GetAtt Client3.PublicIp
-    Description: Public IP address of the Client3
