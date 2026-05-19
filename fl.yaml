@@ -70,7 +70,7 @@ Resources:
                     git clone https://github.com/dsquarre/SmartMonitoring.git SmartMonitoring
                     chown -R ubuntu:ubuntu .
                     cd SmartMonitoring/client
-                    echo "rickroll" > psswd.txt
+                    echo "P7h1!quiBO0no96" > psswd.txt
                     echo "https://${Server.PublicIp}:8000" > url.txt
                     python3 -m venv venv
                     venv/bin/pip3 install -r requirements.txt
@@ -102,7 +102,7 @@ Resources:
                     git clone https://github.com/dsquarre/SmartMonitoring.git SmartMonitoring
                     chown -R ubuntu:ubuntu .
                     cd SmartMonitoring/client
-                    echo "rickroll" > psswd.txt
+                    echo "P7h1!quiBO0no96" > psswd.txt
                     echo "https://${Server.PublicIp}:8000" > url.txt
                     python3 -m venv venv
                     venv/bin/pip3 install -r requirements.txt

@@ -25,7 +25,7 @@ client_metrics = deque()
 done = False
 global_metrics = {}
 
-os.makedirs('uploads', exist_ok=True)
+
 os.makedirs('models', exist_ok=True)
 
 if not os.path.exists('upload_log.csv'):
@@ -221,14 +221,12 @@ async def upload_local_model(
         print('invalid client')
         return {"error": "Invalid client ID. Please connect to the server first to get a valid ID."}
 
-    filename = f"models/client_{client_id}_model_{next_round}.keras"
-    file_path = os.path.join("uploads", filename)
-    
+    file_path = f"models/client_{client_id}_model_{next_round}.keras"
     with open(file_path, "wb") as buffer:
         buffer.write(await file.read())
     
     client_queues.append((file_path, samples))
-    log_upload(client_id, filename, samples)
+    log_upload(client_id, file_path, samples)
     
     print(f"Received update from {client_id}. clients in queue: {len(client_queues)}")
     background_tasks.add_task(aggregate_models)
