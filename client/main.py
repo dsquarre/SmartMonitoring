@@ -177,6 +177,7 @@ def main():
                 print("Upload failed. Retrying...")
                 time.sleep(10)
         done = False
+        
         while not done:
             response = requests.get(f"{server_url}/done")
             if response.status_code == 200:

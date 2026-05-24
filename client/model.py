@@ -14,7 +14,9 @@ class Model:
             path,
             mmap_mode='r'
         )
-
+        
+        self.dataset_name = path
+        
         self.X = self.data['X']
         self.y_anom = self.data['y_anomaly']
         self.y_dis = self.data['y_disease']
@@ -281,8 +283,17 @@ class Model:
             self.y_dis[self.test_indices],
             axis=1
         )
+        
 
+        results = self.model.evaluate(
+        test_ds,
+        verbose=0,
+        return_dict=True
+        )
+        
         metrics = {
+
+            "total_loss": results["loss"],
 
             "anomaly_accuracy": accuracy_score(
                 true_anom,
