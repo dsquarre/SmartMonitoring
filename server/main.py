@@ -27,7 +27,6 @@ global_metrics = {}
 round_history = []
 
 
-
 os.makedirs('models', exist_ok=True)
 
 if not os.path.exists('upload_log.csv'):

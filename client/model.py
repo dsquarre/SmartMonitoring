@@ -311,7 +311,6 @@ class Model:
                 average='weighted'
             )
         }
-
         return metrics
 
     def get_weights(self):
