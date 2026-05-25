@@ -14,7 +14,7 @@ import numpy as np
 import bcrypt
 
 #vars
-rounds_left = 2
+rounds_left = 10
 clients = set()
 model = Model()
 app = FastAPI()
