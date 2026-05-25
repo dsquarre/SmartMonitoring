@@ -14,7 +14,7 @@ import numpy as np
 import bcrypt
 
 #vars
-rounds_left = 1
+rounds_left = 10
 clients = set()
 model = Model()
 app = FastAPI()
@@ -24,6 +24,7 @@ client_queues = deque()
 client_metrics = deque()
 done = False
 global_metrics = {}
+round_history = []
 
 
 os.makedirs('models', exist_ok=True)
@@ -112,21 +113,97 @@ def aggregate_models():
         next_round+=1
 
 def evaluate():
-    global client_metrics,done,global_metrics
+    global client_metrics,done,global_metrics,current_round,round_history
     #print(client_metrics)
     #client_metrics is a deque of tuple (local_metrics,samples)->(dict,int)
     if len(client_metrics)>2:
         total_samples = sum(samples for _, samples in client_metrics)
         metric_names = client_metrics[0][0].keys()
+        round_metrics = {}
         for metric in metric_names:
             weighted_metric = 0.0
             for metrics, samples in client_metrics:
                 weighted_metric += (metrics[metric]* (samples/total_samples))
-            global_metrics[metric] = weighted_metric
-        done = True
-        with open("global_metrics.txt", "w") as f:
-            f.write(str(global_metrics))
+            round_metrics[metric] = weighted_metric
+        round_metrics["round"] = current_round
+        global_metrics = round_metrics
+        round_history.append(round_metrics)
+        with open("global_metrics.txt", "a") as f:
+            f.write(str(round_metrics) + "\n")
+
+        plot_metrics()
         client_metrics.clear()
+        done = True
+
+def plot_metrics():
+
+    import matplotlib.pyplot as plt
+    import matplotlib
+    matplotlib.use('Agg')
+    
+    if len(round_history) == 0:
+        return
+
+    rounds = [
+        x["round"]
+        for x in round_history
+    ]
+
+    #loss
+    plt.figure(figsize=(8, 5))
+    plt.plot(
+    rounds,
+    [x["total_loss"] for x in round_history],
+    marker='o',
+    label='Total Loss'
+    )
+    plt.xlabel("Federated Round")
+    plt.ylabel("Loss")
+    plt.title("Loss vs Federated Round")
+    plt.legend()
+    plt.grid(True)
+    plt.savefig("loss_vs_round.png")
+    plt.close()
+
+    #accuracy
+    plt.figure(figsize=(8, 5))
+    plt.plot(
+        rounds,
+        [x["anomaly_accuracy"] for x in round_history],
+        marker='o',
+        label='Anomaly Accuracy'
+    )
+    plt.plot(
+        rounds,
+        [x["disease_accuracy"] for x in round_history],
+        marker='o',
+        label='Disease Accuracy'
+    )
+    plt.xlabel("Federated Round")
+    plt.ylabel("Accuracy")
+    plt.title("Accuracy vs Federated Round")
+    plt.legend()
+    plt.grid(True)
+    plt.savefig("accuracy_vs_round.png")
+    plt.close()
+
+    #F1
+    plt.figure(figsize=(8, 5))
+    plt.plot(
+        rounds,
+        [x["disease_f1"] for x in round_history],
+        marker='o'
+    )
+
+    plt.xlabel("Federated Round")
+    plt.ylabel("Disease F1 Score")
+    plt.title("Disease F1 vs Federated Round")
+    plt.legend()
+    plt.grid(True)
+    plt.savefig("f1_vs_round.png")
+    plt.close()
+
+    print("Metric plots saved.")
 
 """
 client_metrics format:
@@ -242,12 +319,10 @@ async def eval_upload(
     global clients,rounds_left,client_metrics
     if client_id not in clients:
         return {"error": "Invalid client ID. Please connect to the server first to get a valid ID."}
-    if rounds_left > 0:
-        return {"message": "Round not complete yet. Please wait for the next round to finish."}
+    done=False
     client_metrics.append((local_metrics,samples))
     log_upload(client_id, "local_metrics", samples)
     print(f"Received eval update from {client_id}. clients in queue: {len(client_metrics)}")
 
     background_tasks.add_task(evaluate)
     return {"message": "uploaded successfully"}
-

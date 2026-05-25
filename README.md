@@ -4,7 +4,6 @@ Sponsored by AWS Amazon
 ```
 .
 ├── client
-│   ├── data/
 │   ├── main.py
 │   ├── model.py
 │   ├── psswd.txt
