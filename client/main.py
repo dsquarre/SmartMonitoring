@@ -66,7 +66,7 @@ class Client:
             psswd = f.read().strip()
         url = f"{server_url}/"
         try:
-            response = requests.post(url,data=psswd)
+            response = requests.post(url,json=psswd)
             if response.status_code == 200:
                 auth_info = response.json()
                 self.client_id = auth_info.get("your_id", None)
@@ -168,30 +168,30 @@ def main():
     
     while simulate(clients):
         print("round done")
-    for i in range(n):
-        client = clients[i]
-        local_met = client.model.evaluate()
-        #dummy metrics for testing
-        #local_met = {"anomaly_accuracy": 0.95, "disease_accuracy": 0.90, "disease_f1": 0.88}
-        with open(f"metrics/local_metrics_client{i}.txt", "w") as f:
-            f.write(str(local_met))
-        while not client.eval_upload(local_met):
-            print("Upload failed. Retrying...")
+        for i in range(n):
+            client = clients[i]
+            local_met = client.model.evaluate()
+            with open(f"metrics/local_metrics_client{i}.txt", "w") as f:
+                f.write(str(local_met))
+            while not client.eval_upload(local_met):
+                print("Upload failed. Retrying...")
+                time.sleep(10)
+        done = False
+        while not done:
+            response = requests.get(f"{server_url}/done")
+            if response.status_code == 200:
+                done = response.json().get("message", False)
+            else:
+                print(
+                    f"Failed to check completion status: "
+                    f"{response.status_code}"
+                )
+            print('global metrics not available yet')
             time.sleep(10)
 
-    done = False
-    while not done:
-        response = requests.get(f"{server_url}/done")
-        if response.status_code == 200:
-            done = response.json().get("message", False)
-        else:
-            print(f"Failed to check completion status: {response.status_code}")
-        print('global metrics not available yet')
-        time.sleep(10)
-    
-    global_met = global_metrics()
-    with open("metrics/global_metrics.txt", "w") as f:
-        f.write(str(global_met))
+        global_met = global_metrics()
+        with open("metrics/global_metrics.txt", "a") as f:
+            f.write(str(global_met) + "\n")
 
 if __name__ == "__main__":
     main()
