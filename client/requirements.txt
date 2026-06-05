@@ -2,5 +2,6 @@ tensorflow
 requests
 numpy
 scikit-learn
+websockets
 matplotlib
 seaborn

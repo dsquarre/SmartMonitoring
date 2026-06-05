@@ -4,3 +4,6 @@ python-multipart
 tensorflow
 numpy
 bcrypt
+websockets
+matplotlib
+seaborn
