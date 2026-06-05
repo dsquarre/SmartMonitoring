@@ -1,48 +1,24 @@
 # Federated Learning System for Healthcare 
 Sponsored by AWS Amazon
-- Compeletely abstracted code pipeline for Federated Learning
-```
-.
-├── client
-│   ├── main.py
-│   ├── model.py
-│   ├── psswd.txt
-│   ├── requirements.txt
-│   └── url.txt
-│   
-├── fl.yaml
-├── LICENSE
-├── README.md
-└── server
-    ├── main.py
-    ├── model.py
-    ├── ps.dat
-    └── requirements.txt
-```
 
 ## Client Side 
 
-- Clients control the flow of execution of code. Each client that wants to participate in the system first authenticates itself with a password to get a client_id
-- Using this Id it can upload its local training weights and evaluation report
-- Downloading the global model or getting version info does not require client id and hence no id is required for those methods
-- Authentication is done in order to prevent model poisoning attacks
-- To simulate multiple clients on low RAM, we used sequential client loading and updating
-- Each clients data is stored as C0.npz, C1.npz etc so the argument should only be the directory and starting name of the data files
-- Each client obj with its own model and id is stored in a list and each client trains and uploads its model one by one till all the uploads are done or no rounds are left
-- Then after a new global version is available, all clients download the global model and reinitialize their model weights
-- After all rounds are done, all clients one by one evaluate the model on their local data and upload local metrics on the server
-- Get the global metrics and logs it after its done
+- Clients ping server with a password to get client id.
+- Each client opens a websocket at ws/ip:8000/ws/client_id and recieves commands from server to either "train" or "wait" or "stop". 
+- Each client that recieves train downloads global model, start training, upload file to server other clients wait
+- To preserve RAM client.py runs multiple sequential clients that train and evaluate one by one instead of parallely.
+- Then each client gets pinged to start evaluation and evaluate model on their local test data and upload metrics to server
+- Each client also makes a local & global metrics vs round plot to check convergence
 
 
 ## Server Side
 
-- Server is deployed on AWS cloud and runs on a uvicorn server which constantly waits for users to authenticate and upload their weights
-- A round consists of N>=10 clients uploading their weights (it starts a background check for aggregate function), after which FedAvg algorithm w_i_t+1 = sigma(t=1,n,(Ni*w_t/N)) is used to calculate global weights and saved in global_model_path and current_round is incremented
-- To avoid stale update problem, clients upload their round and server checks if it matches the current round, if not the model file is dropped else it is queued
-- We set the current version to higher to avoid clients from asynchronously uploading model files while aggregation is happening and after aggregation, client modle queue is cleared to start receiving fresh updates
-- Clients regularily ping the server to check if the server's current_round is different from their local current round, if yes then they download the latest global_model file and start the next round
-- This is repeated until rounds_left becomes 0 after which clients start their local evaluation of the model and upload to the server(starting a background check for aggregate function). When N>=10 authenticated clients have uploaded evaluation metrics, FedAvg of client metrics is done and global_metrics is available to download by setting done=True.
-- Clients regularily ping the server/done and if its true, they download the global metrics.
+- Generates a random id for each user on recieving password
+- Allows only authenticated users to start websocket
+- Once N clients have started socket, start fd round. 
+- For now, all clients recieve "train" command
+- Applies simple FedAvg algorithm to update global model and pings each client when done
+- When all clients have uploaded evaluation metrics, again apply FedAvg on metrics to get global metrics and start next round till all rounds are done
 
 ## FL.YAML
 
@@ -61,8 +37,7 @@ ssh-keygen -t rsa -b 2048
 
 ## TODOs
 - Error and edge cases handling
-- Testing on AWS server and online clients to check convergence
-- Writing tests for stale model and metrics update and if the server drops them as intended
+- check convergence
 
 ## How to Use
 
@@ -99,4 +74,3 @@ nohup python -m uvicorn main:app --host 0.0.0.0 --port 8000 > server_log.txt 2>&
 #to kill
 #sudo fuser -k 8000/tcp
 ```
-

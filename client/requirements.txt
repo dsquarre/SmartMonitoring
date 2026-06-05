@@ -2,3 +2,5 @@ tensorflow
 requests
 numpy
 scikit-learn
+matplotlib
+seaborn

@@ -2,9 +2,11 @@ import os
 import sys
 import io
 import csv
+import json
+import asyncio
 from datetime import datetime
 from collections import defaultdict
-from fastapi import FastAPI, UploadFile, File, Form, Body,HTTPException, BackgroundTasks
+from fastapi import FastAPI, Body, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 import tensorflow as tf
 from model import Model
@@ -14,13 +16,13 @@ import numpy as np
 import bcrypt
 
 #vars
-rounds_left = 10
+N = 3
+rounds_left = 3
 clients = set()
 model = Model()
 app = FastAPI()
 current_round = 0
 next_round = 1
-client_queues = deque()
 client_metrics = deque()
 done = False
 global_metrics = {}
@@ -40,7 +42,7 @@ if not os.path.exists("models/global_model_0.keras"):
     print(f"Created initial global model at global_model_0.keras")
 
 def generate_id():
-    a = 'abcdefghijklmnopqrstuvwxyz!@#$%&ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+    a = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
     n = len(a)
     l = (random.randint(16,32))
     word = ''
@@ -90,33 +92,12 @@ def aggregate(client_data,global_model_path):
     global_model.model.save(global_model_path)
 
 
-def aggregate_models():
-    global client_queues,current_round, next_round,rounds_left,client_metrics
-    client_metrics.clear()
-    if len(client_queues) > 2:
-        print('starting aggregation')
-        current_round += 1
-        client_data = []
-        files_to_delete = []
-        for i in range(len(client_queues)):
-            file_info,samples = client_queues.popleft()
-            client_data.append((file_info, samples))
-            files_to_delete.append(file_info)
-        files_to_delete.append(f"models/global_model_{next_round - 1}.keras")  
-        aggregate(client_data, f"models/global_model_{next_round}.keras")
-        for path in files_to_delete:
-            if os.path.exists(path):
-                os.remove(path)
-        client_queues.clear()
-        print(f"Round {next_round} complete.")
-        rounds_left -= 1
-        next_round+=1
 
 def evaluate():
-    global client_metrics,done,global_metrics,current_round,round_history
+    global client_metrics, done, global_metrics, current_round, round_history, N
     #print(client_metrics)
     #client_metrics is a deque of tuple (local_metrics,samples)->(dict,int)
-    if len(client_metrics)>2:
+    if len(client_metrics) >= N:
         total_samples = sum(samples for _, samples in client_metrics)
         metric_names = client_metrics[0][0].keys()
         round_metrics = {}
@@ -139,7 +120,9 @@ def plot_metrics():
 
     import matplotlib.pyplot as plt
     import matplotlib
+    import seaborn as sns
     matplotlib.use('Agg')
+    sns.set_theme(style="darkgrid")
     
     if len(round_history) == 0:
         return
@@ -237,37 +220,6 @@ def authenticate(password):
             return True
     else:
         return False
-    
-@app.get("/evaluate")
-async def get_global_eval():
-    global global_metrics
-    return {"global_metrics": global_metrics}
-
-@app.get("/version")
-async def version():
-    global next_round, rounds_left
-    print(f"Global round: {next_round}, Rounds left: {rounds_left}")
-    return {"global_round": next_round, "rounds_left": rounds_left}
-
-@app.get("/done")
-async def finished():
-    global done
-    print(done)
-    return {"message":done}
-
-@app.get("/download")
-async def get_global_model():
-    global next_round
-    model_path = f"models/global_model_{next_round - 1}.keras"
-    
-    if not os.path.exists(model_path):
-        raise HTTPException(status_code=404, detail=f"Global model for round {next_round - 1} not found.")
-    
-    return FileResponse(
-        path=model_path, 
-        filename=model_path,
-        headers={"Global-Round": str(next_round - 1)}
-    )
 
 @app.post("/")
 async def root(psswd: str = Body(...),):
@@ -281,48 +233,166 @@ async def root(psswd: str = Body(...),):
     return {"your_id": id}
 
 
+class FederatedServer:
+    def __init__(self):
+        self.clients = {}
+        self.client_uploads = []
+        self.is_running = False
 
-@app.post("/upload")
-async def upload_local_model(
-    background_tasks: BackgroundTasks,
-    client_id: str = Form(...), 
-    client_round:int = Body(...),
-    samples: float = Form(1.0),
-    file: UploadFile = File(...),
-):
-    global next_round,client_queues,clients,current_round
-    if client_round<current_round:
-        print('stale update dropped')
-        return {"message":"stale update, file dropped"}
+    async def connect(self, client_id, websocket: WebSocket):
+        self.clients[client_id] = websocket
+        msg = await websocket.receive_text()
+        if msg != "ready":
+            print(f"Unexpected message from {client_id}: {msg}")
+        
+
+    def disconnect(self,client_id):
+        if client_id in self.clients:
+            del self.clients[client_id]
+
+    async def start(self):
+        global next_round, rounds_left
+        while rounds_left > 0:
+            print(f"Starting round {next_round}")
+            self.client_uploads = []
+            
+            send_tasks = []
+            for client_id, ws in self.clients.items():
+                send_tasks.append(ws.send_text("train"))
+            await asyncio.gather(*send_tasks)
+
+            model_path = f"models/global_model_{next_round - 1}.keras"
+            with open(model_path, "rb") as f:
+                model_bytes = f.read()
+            send_model_tasks = []
+            for client_id, ws in self.clients.items():
+                send_model_tasks.append(ws.send_bytes(model_bytes))
+            await asyncio.gather(*send_model_tasks)
+
+            recv_tasks = []
+            for client_id, ws in self.clients.items():
+                recv_tasks.append(self.receive_model(client_id, ws))
+            
+            results = await asyncio.gather(*recv_tasks)
+            
+            for res in results:
+                if res:
+                    self.client_uploads.append(res)
+            
+            self.agg()
+
+            print("Starting evaluation for the round.")
+            eval_send_tasks = []
+            for client_id, ws in self.clients.items():
+                eval_send_tasks.append(ws.send_text("eval"))
+            await asyncio.gather(*eval_send_tasks)
+            
+            model_path = f"models/global_model_{next_round - 1}.keras"
+            with open(model_path, "rb") as f:
+                model_bytes = f.read()
+                
+            eval_model_tasks = []
+            for client_id, ws in self.clients.items():
+                eval_model_tasks.append(ws.send_bytes(model_bytes))
+            await asyncio.gather(*eval_model_tasks)
+                
+            eval_recv_tasks = []
+            for client_id, ws in self.clients.items():
+                eval_recv_tasks.append(self.receive_eval(client_id, ws))
+                
+            await asyncio.gather(*eval_recv_tasks)
+            
+            evaluate()
+
+            if round_history:
+                latest_metrics = round_history[-1]
+                metrics_payload = json.dumps(latest_metrics)
+                metrics_send_tasks = []
+                for client_id, ws in self.clients.items():
+                    metrics_send_tasks.append(ws.send_text("metrics"))
+                await asyncio.gather(*metrics_send_tasks)
+                
+                metrics_data_tasks = []
+                for client_id, ws in self.clients.items():
+                    metrics_data_tasks.append(ws.send_text(metrics_payload))
+                await asyncio.gather(*metrics_data_tasks)
+
+        print("Federated learning rounds completed.")
+        
+        exit_tasks = []
+        for client_id, ws in self.clients.items():
+            exit_tasks.append(ws.send_text("exit"))
+        await asyncio.gather(*exit_tasks)
+        self.is_running = False
+
+    async def receive_model(self, client_id, ws: WebSocket):
+        global next_round
+        try:
+            msg = await ws.receive_text()
+            if msg == "FILE":
+                samples_str = await ws.receive_text()
+                samples = float(samples_str)
+                file_bytes = await ws.receive_bytes()
+                file_path = f"models/client_{client_id}_model_{next_round}.keras"
+                with open(file_path, "wb") as f:
+                    f.write(file_bytes)
+                
+                done_msg = await ws.receive_text()
+                if done_msg == "done":
+                    log_upload(client_id, file_path, samples)
+                    return (file_path, samples)
+        except Exception as e:
+            print(f"Error receiving from {client_id}: {e}")
+        return None
+
+    async def receive_eval(self, client_id, ws: WebSocket):
+        global client_metrics
+        try:
+            msg = await ws.receive_text()
+            if msg == "EVAL":
+                samples_str = await ws.receive_text()
+                samples = float(samples_str)
+                metrics_str = await ws.receive_text()
+                local_metrics = json.loads(metrics_str)
+                client_metrics.append((local_metrics, samples))
+        except Exception as e:
+            print(f"Error receiving eval from {client_id}: {e}")
+
+    def agg(self):
+        global next_round, rounds_left, current_round
+        print('starting aggregation')
+        if len(self.client_uploads) > 0:
+            current_round += 1
+            aggregate(self.client_uploads, f"models/global_model_{next_round}.keras")
+            for file_path, _ in self.client_uploads:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+            old_model = f"models/global_model_{next_round - 1}.keras"
+            if os.path.exists(old_model):
+                os.remove(old_model)
+            print(f"Round {next_round} complete.")
+            next_round += 1
+            rounds_left -= 1
+        self.client_uploads.clear()
+        
+
+manager = FederatedServer()
+
+@app.websocket("/ws/{client_id}")
+async def websocket_endpoint(websocket: WebSocket, client_id: str):
+    global clients,manager,N
     if client_id not in clients:
-        print('client id not in the authenticated clients')
-        return {"error": "Invalid client ID. Please connect to the server first to get a valid ID."}
-
-    file_path = f"models/client_{client_id}_model_{next_round}.keras"
-    with open(file_path, "wb") as buffer:
-        buffer.write(await file.read())
-    
-    client_queues.append((file_path, samples))
-    log_upload(client_id, file_path, samples)
-    
-    print(f"Received update from {client_id}. clients in queue: {len(client_queues)}")
-    background_tasks.add_task(aggregate_models)
-    return {"message": "uploaded successfully"}
-
-@app.post("/eval_upload")
-async def eval_upload(
-    background_tasks: BackgroundTasks,
-    client_id:str = Body(...),
-    samples:float = Body(...),
-    local_metrics: dict = Body(...),
-):
-    global clients,rounds_left,client_metrics
-    if client_id not in clients:
-        return {"error": "Invalid client ID. Please connect to the server first to get a valid ID."}
-    done=False
-    client_metrics.append((local_metrics,samples))
-    log_upload(client_id, "local_metrics", samples)
-    print(f"Received eval update from {client_id}. clients in queue: {len(client_metrics)}")
-
-    background_tasks.add_task(evaluate)
-    return {"message": "uploaded successfully"}
+        await websocket.close(code=1008)
+        return
+    await websocket.accept()
+    await manager.connect(client_id, websocket)
+    if len(manager.clients) >= N and not manager.is_running:
+        manager.is_running = True
+        asyncio.create_task(manager.start())
+    try:
+        while True:
+            await asyncio.sleep(3600)
+            
+    except WebSocketDisconnect:
+        manager.disconnect(client_id)
+        print(f"Client #{client_id} left the chat")

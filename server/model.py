@@ -3,7 +3,7 @@ import numpy as np
 
 class Model:
 
-    def __init__(self, path):
+    def __init__(self):
         self.model = self.build_model()
 
     def build_model(self):

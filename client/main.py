@@ -6,18 +6,21 @@ import time
 import collections
 from model import Model
 import argparse
-
+import asyncio
+import json
 parser = argparse.ArgumentParser()
 parser.add_argument("-d","--dataset", type=str, help="Path to dataset.npz")
 args = parser.parse_args()
-
-server_url = None
-with open("url.txt", "r") as f:
-    server_url = f.read().strip()
-
+training_lock = asyncio.Lock()
+ip = None
+with open("ip.txt", "r") as f:
+    ip = f.read().strip()
+server_url = f"http://{ip}"
+ws_url = f"ws://{ip}/ws/"
 os.makedirs('models', exist_ok=True)
 os.makedirs('metrics', exist_ok=True)
-
+import websockets
+import asyncio
 #client specific methods here
 class Client:
     def __init__(self,filepath):
@@ -26,40 +29,9 @@ class Client:
         self.current_round = -1
         self.model = Model(filepath)
         self.samples = self.model.get_samples()
+        self.local_metrics_history = []
+        self.global_metrics_history = []
 
-    def upload_model(self,file_path):
-        url = f"{server_url}/upload"
-        print(f"client round: {self.current_round}")
-        try:
-            with open(file_path, 'rb') as f:
-                files = {'file': f}
-                data = {'client_id': self.client_id,'client_round':self.current_round, 'samples': self.samples} 
-                response = requests.post(url, files=files, data=data)
-            
-            if response.status_code == 200:
-                print("Model uploaded successfully.")
-                return True
-            else:
-                print(f"Failed to upload model: {response.status_code} - {response.text}")
-                return False
-        except Exception as e:
-            print(f"Error uploading model: {e}")
-            return False
-
-    def eval_upload(self,local_metrics):
-        url = f"{server_url}/eval_upload"
-        try:
-            response = requests.post(url,json={"client_id":self.client_id,"samples":self.samples,"local_metrics": local_metrics})
-            if response.status_code == 200:
-                res = response.json()
-                print(res.get("message",""))
-                return True
-            else:
-                print(f"Failed to upload local_metrics: {response.status_code}")
-                return False
-        except Exception as e:
-            print(f"Error uploading local metrics: {e}")
-            return False
 
     def authenticate(self):
         with open("psswd.txt", "r") as f:
@@ -79,6 +51,58 @@ class Client:
         except Exception as e:
             print(f"Error during authentication: {e}")
 
+
+    def plot_metrics(self):
+        import matplotlib.pyplot as plt
+        import matplotlib
+        import seaborn as sns
+        matplotlib.use('Agg')
+        sns.set_theme(style="darkgrid")
+        
+        if len(self.local_metrics_history) == 0:
+            return
+
+        rounds = [x["round"] for x in self.global_metrics_history]
+
+        # Total Loss
+        plt.figure(figsize=(8, 5))
+        plt.plot(rounds, [x["total_loss"] for x in self.local_metrics_history], marker='o', label='Local Loss')
+        plt.plot(rounds, [x["total_loss"] for x in self.global_metrics_history], marker='x', label='Global Loss')
+        plt.xlabel("Federated Round")
+        plt.ylabel("Loss")
+        plt.title(f"Loss vs Federated Round - Client {self.client_id}")
+        plt.legend()
+        plt.grid(True)
+        plt.savefig(f"metrics/loss_vs_round_client_{self.client_id}.png")
+        plt.close()
+
+        # Accuracy
+        plt.figure(figsize=(8, 5))
+        plt.plot(rounds, [x["anomaly_accuracy"] for x in self.local_metrics_history], marker='o', label='Local Anomaly Accuracy')
+        plt.plot(rounds, [x["disease_accuracy"] for x in self.local_metrics_history], marker='o', label='Local Disease Accuracy')
+        plt.plot(rounds, [x["anomaly_accuracy"] for x in self.global_metrics_history], marker='x', label='Global Anomaly Accuracy')
+        plt.plot(rounds, [x["disease_accuracy"] for x in self.global_metrics_history], marker='x', label='Global Disease Accuracy')
+        plt.xlabel("Federated Round")
+        plt.ylabel("Accuracy")
+        plt.title(f"Accuracy vs Federated Round - Client {self.client_id}")
+        plt.legend()
+        plt.grid(True)
+        plt.savefig(f"metrics/accuracy_vs_round_client_{self.client_id}.png")
+        plt.close()
+
+        # F1 Score
+        plt.figure(figsize=(8, 5))
+        plt.plot(rounds, [x["disease_f1"] for x in self.local_metrics_history], marker='o', label='Local Disease F1')
+        plt.plot(rounds, [x["disease_f1"] for x in self.global_metrics_history], marker='x', label='Global Disease F1')
+        plt.xlabel("Federated Round")
+        plt.ylabel("Disease F1 Score")
+        plt.title(f"Disease F1 vs Federated Round - Client {self.client_id}")
+        plt.legend()
+        plt.grid(True)
+        plt.savefig(f"metrics/f1_vs_round_client_{self.client_id}.png")
+        plt.close()
+        
+        print(f"[{self.client_id}] Metric plots saved.")
 
 #methods common to all clients here
 
@@ -128,37 +152,66 @@ def download_model(save_path):
         return False
 
 
-def simulate(clients):
-    for i in range(len(clients)): #no of sequential clients
-        client = clients[i]
-        global_round, rounds_left = get_version()
-        if client.current_round<0:
-            client.current_round = global_round-1
-        else:
-            while global_round-1<client.current_round:
-                print('waiting for latest model')
-                time.sleep(10)
-                global_round, rounds_left = get_version()
-        if not download_model("models/global_model.keras"):
-            print("Could not download global model, network error")
-            sys.exit(1)
-        else:
-            client.model.model.load_weights("models/global_model.keras")
 
-        if rounds_left > 0:
-            client.model.train(epochs=1)
-            client.current_round+=1
-            client.model.model.save(f"models/client{i}_model.keras")
-            while not client.upload_model(f"models/client{i}_model.keras"):
-                print("Upload failed. Retrying...")
-                time.sleep(10)
-        else:
-            print(f'rounds left : {rounds_left}')
-            return False
-    return True
+async def simulate(client):
+    try:
+        async with websockets.connect(ws_url+client.client_id, max_size=None) as ws:
+            await ws.send("ready")
+            while True:
+                msg = await ws.recv()
+                if msg == "train":
+                    print(f"[{client.client_id}] selected for training")
+                    model_bytes = await ws.recv()
+                    if isinstance(model_bytes, str):
+                        model_bytes = model_bytes.encode('utf-8')
+                    model_path = f"models/global_model_{client.client_id}.keras"
+                    with open(model_path, "wb") as f:
+                        f.write(model_bytes)
+                    client.model.model.load_weights(model_path)
+                    
+                    async with training_lock:
+                        await asyncio.to_thread(client.model.train, 1)
+                        client_model_path = f"models/client{client.client_id}_model.keras"
+                        client.model.model.save(client_model_path)
+                        await ws.send("FILE")
+                        await ws.send(str(client.samples))
+                        with open(client_model_path, "rb") as f:
+                            await ws.send(f.read())
+                        await ws.send("done")
+                    client.current_round += 1
+                elif msg == "eval":
+                    print(f"[{client.client_id}] starting evaluation")
+                    model_bytes = await ws.recv()
+                    if isinstance(model_bytes, str):
+                        model_bytes = model_bytes.encode('utf-8')
+                    model_path = f"models/global_model_{client.client_id}.keras"
+                    with open(model_path, "wb") as f:
+                        f.write(model_bytes)
+                    client.model.model.load_weights(model_path)
+                    
+                    async with training_lock:
+                        local_met = await asyncio.to_thread(client.model.evaluate)
+                        client.local_metrics_history.append(local_met)
+
+                    await ws.send("EVAL")
+                    await ws.send(str(client.samples))
+                    await ws.send(json.dumps(local_met))
+                elif msg == "metrics":
+                    metrics_str = await ws.recv()
+                    global_met = json.loads(metrics_str)
+                    client.global_metrics_history.append(global_met)
+                    print(f"[{client.client_id}] received global metrics")
+                elif msg == "wait":
+                    print(f"[{client.client_id}] Not selected")
+                elif msg == "exit":
+                    print(f"[{client.client_id}] Finished Training and Evaluation")
+                    client.plot_metrics()
+                    return
+    except websockets.exceptions.ConnectionClosed:
+        print(f"[Client {client.client_id}] Server closed the connection.")
 
 
-def main():
+async def main():
     clients = []
     n = 3
     for i in range(n): #no of sequential clients
@@ -166,32 +219,8 @@ def main():
         client = Client(path)
         clients.append(client)
     
-    while simulate(clients):
-        print("round done")
-        for i in range(n):
-            client = clients[i]
-            local_met = client.model.evaluate()
-            with open(f"metrics/local_metrics_client{i}.txt", "w") as f:
-                f.write(str(local_met))
-            while not client.eval_upload(local_met):
-                print("Upload failed. Retrying...")
-                time.sleep(10)
-        done = False
-        while not done:
-            response = requests.get(f"{server_url}/done")
-            if response.status_code == 200:
-                done = response.json().get("message", False)
-            else:
-                print(
-                    f"Failed to check completion status: "
-                    f"{response.status_code}"
-                )
-            print('global metrics not available yet')
-            time.sleep(10)
-
-        global_met = global_metrics()
-        with open("metrics/global_metrics.txt", "a") as f:
-            f.write(str(global_met) + "\n")
+    tasks = [simulate(client) for client in clients]
+    await asyncio.gather(*tasks)
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

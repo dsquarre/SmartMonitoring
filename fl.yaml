@@ -71,7 +71,7 @@ Resources:
                     chown -R ubuntu:ubuntu .
                     cd SmartMonitoring/client
                     echo "P7h1!quiBO0no96" > psswd.txt
-                    echo "https://${Server.PublicIp}:8000" > url.txt
+                    echo "${Server.PublicIp}:8000" > ip.txt
                     python3 -m venv venv
                     venv/bin/pip3 install -r requirements.txt
     Client2:
@@ -103,7 +103,7 @@ Resources:
                     chown -R ubuntu:ubuntu .
                     cd SmartMonitoring/client
                     echo "P7h1!quiBO0no96" > psswd.txt
-                    echo "https://${Server.PublicIp}:8000" > url.txt
+                    echo "${Server.PublicIp}:8000" > ip.txt
                     python3 -m venv venv
                     venv/bin/pip3 install -r requirements.txt
     
