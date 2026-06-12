@@ -1,31 +1,26 @@
 import os
-import sys
-import io
 import csv
 import json
 import asyncio
 from datetime import datetime
-from collections import defaultdict
-from fastapi import FastAPI, Body, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, Body, WebSocket, WebSocketDisconnect
 import tensorflow as tf
 from model import Model
 from collections import deque
 import random
 import numpy as np
 import bcrypt
+from selector import RandomClientSelector
+from aggregator import FedAvg
 
 #vars
-N = 3
+N = 5
+K = 3
 rounds_left = 3
 clients = set()
-model = Model()
 app = FastAPI()
 current_round = 0
-next_round = 1
 client_metrics = deque()
-done = False
-global_metrics = {}
 round_history = []
 
 
@@ -54,47 +49,13 @@ def generate_id():
 def log_upload(client_id, filename, weight):
     with open('upload_log.csv', 'a', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow([datetime.now().isoformat(), client_id, filename, weight, next_round])
+        writer.writerow([datetime.now().isoformat(), client_id, filename, weight, current_round + 1])
 
-def aggregate(client_data,global_model_path):
-    global_model = Model()
-    total_samples = sum(samples for _, samples in client_data)
-
-    aggregated_weights = None
-    for model_path, client_samples in client_data:
-
-        local_model = Model()
-        local_model.model.load_weights(model_path)
-
-        # [weights, biases, weights, biases, ...]
-        local_weights = local_model.model.get_weights()
-
-        if aggregated_weights is None:
-
-            aggregated_weights = [
-
-                np.zeros_like(layer)
-
-                for layer in local_weights
-            ]
-
-        for i in range(len(local_weights)):
-
-            aggregated_weights[i] += (
-
-                local_weights[i]
-
-                * (client_samples / total_samples)
-
-            )
-
-    global_model.model.set_weights(aggregated_weights)
-    global_model.model.save(global_model_path)
 
 
 
 def evaluate():
-    global client_metrics, done, global_metrics, current_round, round_history, N
+    global client_metrics, current_round, round_history, N
     #print(client_metrics)
     #client_metrics is a deque of tuple (local_metrics,samples)->(dict,int)
     if len(client_metrics) >= N:
@@ -107,14 +68,12 @@ def evaluate():
                 weighted_metric += (metrics[metric]* (samples/total_samples))
             round_metrics[metric] = weighted_metric
         round_metrics["round"] = current_round
-        global_metrics = round_metrics
         round_history.append(round_metrics)
         with open("global_metrics.txt", "a") as f:
             f.write(str(round_metrics) + "\n")
 
         plot_metrics()
         client_metrics.clear()
-        done = True
 
 def plot_metrics():
 
@@ -123,7 +82,7 @@ def plot_metrics():
     import seaborn as sns
     matplotlib.use('Agg')
     sns.set_theme(style="darkgrid")
-    
+
     if len(round_history) == 0:
         return
 
@@ -226,7 +185,6 @@ async def root(psswd: str = Body(...),):
     if not psswd or not authenticate(psswd):
         print('invalid password attempt')
         return {"message": "Welcome to the Federated Learning Server."}
-    global done
     id = generate_id()
     clients.add(id)
     print(f"Client {id} connected. Total clients: {len(clients)}")
@@ -234,51 +192,64 @@ async def root(psswd: str = Body(...),):
 
 
 class FederatedServer:
-    def __init__(self):
+    def __init__(self, selector=None, aggregator=None):
         self.clients = {}
         self.client_uploads = []
         self.is_running = False
+        self.selector = selector or RandomClientSelector()
+        self.aggregator = aggregator or FedAvg()
 
     async def connect(self, client_id, websocket: WebSocket):
         self.clients[client_id] = websocket
         msg = await websocket.receive_text()
         if msg != "ready":
             print(f"Unexpected message from {client_id}: {msg}")
-        
+
 
     def disconnect(self,client_id):
         if client_id in self.clients:
             del self.clients[client_id]
 
     async def start(self):
-        global next_round, rounds_left
+        global rounds_left, current_round, K
         while rounds_left > 0:
-            print(f"Starting round {next_round}")
+            print(f"Starting round {current_round + 1}, rounds left: {rounds_left}")
             self.client_uploads = []
-            
+
+            client_ids = list(self.clients.keys())
+            selected_ids = self.selector.select_clients(client_ids, K, context={"round": current_round + 1})
+            selected_set = set(selected_ids)
+            print(f"Selected clients for training: {selected_ids}")
+
             send_tasks = []
             for client_id, ws in self.clients.items():
-                send_tasks.append(ws.send_text("train"))
+                if client_id in selected_set:
+                    send_tasks.append(ws.send_text("train"))
+                else:
+                    send_tasks.append(ws.send_text("wait"))
             await asyncio.gather(*send_tasks)
 
-            model_path = f"models/global_model_{next_round - 1}.keras"
+            model_path = f"models/global_model_{current_round}.keras"
             with open(model_path, "rb") as f:
                 model_bytes = f.read()
+
             send_model_tasks = []
-            for client_id, ws in self.clients.items():
+            for client_id in selected_ids:
+                ws = self.clients[client_id]
                 send_model_tasks.append(ws.send_bytes(model_bytes))
             await asyncio.gather(*send_model_tasks)
 
             recv_tasks = []
-            for client_id, ws in self.clients.items():
+            for client_id in selected_ids:
+                ws = self.clients[client_id]
                 recv_tasks.append(self.receive_model(client_id, ws))
-            
+
             results = await asyncio.gather(*recv_tasks)
-            
+
             for res in results:
                 if res:
                     self.client_uploads.append(res)
-            
+
             self.agg()
 
             print("Starting evaluation for the round.")
@@ -286,22 +257,22 @@ class FederatedServer:
             for client_id, ws in self.clients.items():
                 eval_send_tasks.append(ws.send_text("eval"))
             await asyncio.gather(*eval_send_tasks)
-            
-            model_path = f"models/global_model_{next_round - 1}.keras"
+
+            model_path = f"models/global_model_{current_round}.keras"
             with open(model_path, "rb") as f:
                 model_bytes = f.read()
-                
+
             eval_model_tasks = []
             for client_id, ws in self.clients.items():
                 eval_model_tasks.append(ws.send_bytes(model_bytes))
             await asyncio.gather(*eval_model_tasks)
-                
+
             eval_recv_tasks = []
             for client_id, ws in self.clients.items():
                 eval_recv_tasks.append(self.receive_eval(client_id, ws))
-                
+
             await asyncio.gather(*eval_recv_tasks)
-            
+
             evaluate()
 
             if round_history:
@@ -311,14 +282,14 @@ class FederatedServer:
                 for client_id, ws in self.clients.items():
                     metrics_send_tasks.append(ws.send_text("metrics"))
                 await asyncio.gather(*metrics_send_tasks)
-                
+
                 metrics_data_tasks = []
                 for client_id, ws in self.clients.items():
                     metrics_data_tasks.append(ws.send_text(metrics_payload))
                 await asyncio.gather(*metrics_data_tasks)
 
         print("Federated learning rounds completed.")
-        
+
         exit_tasks = []
         for client_id, ws in self.clients.items():
             exit_tasks.append(ws.send_text("exit"))
@@ -326,17 +297,17 @@ class FederatedServer:
         self.is_running = False
 
     async def receive_model(self, client_id, ws: WebSocket):
-        global next_round
+        global current_round
         try:
             msg = await ws.receive_text()
             if msg == "FILE":
                 samples_str = await ws.receive_text()
                 samples = float(samples_str)
                 file_bytes = await ws.receive_bytes()
-                file_path = f"models/client_{client_id}_model_{next_round}.keras"
+                file_path = f"models/client_{client_id}_model_{current_round + 1}.keras"
                 with open(file_path, "wb") as f:
                     f.write(file_bytes)
-                
+
                 done_msg = await ws.receive_text()
                 if done_msg == "done":
                     log_upload(client_id, file_path, samples)
@@ -359,22 +330,21 @@ class FederatedServer:
             print(f"Error receiving eval from {client_id}: {e}")
 
     def agg(self):
-        global next_round, rounds_left, current_round
+        global rounds_left, current_round
         print('starting aggregation')
         if len(self.client_uploads) > 0:
             current_round += 1
-            aggregate(self.client_uploads, f"models/global_model_{next_round}.keras")
+            self.aggregator.aggregate(self.client_uploads, f"models/global_model_{current_round}.keras")
             for file_path, _ in self.client_uploads:
                 if os.path.exists(file_path):
                     os.remove(file_path)
-            old_model = f"models/global_model_{next_round - 1}.keras"
+            old_model = f"models/global_model_{current_round - 1}.keras"
             if os.path.exists(old_model):
                 os.remove(old_model)
-            print(f"Round {next_round} complete.")
-            next_round += 1
+            print(f"Round {current_round} complete.")
             rounds_left -= 1
         self.client_uploads.clear()
-        
+
 
 manager = FederatedServer()
 
@@ -392,7 +362,7 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
     try:
         while True:
             await asyncio.sleep(3600)
-            
+
     except WebSocketDisconnect:
         manager.disconnect(client_id)
         print(f"Client #{client_id} left the chat")
