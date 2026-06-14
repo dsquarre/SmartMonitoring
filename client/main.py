@@ -8,6 +8,9 @@ from model import Model
 import argparse
 import asyncio
 import json
+
+tf.config.set_visible_devices([], 'GPU')
+
 parser = argparse.ArgumentParser()
 parser.add_argument("-d","--dataset", type=str, help="Path to dataset.npz")
 args = parser.parse_args()
@@ -21,6 +24,9 @@ os.makedirs('models', exist_ok=True)
 os.makedirs('metrics', exist_ok=True)
 import websockets
 import asyncio
+
+tf.config.set_visible_devices([], 'GPU')
+
 #client specific methods here
 class Client:
     def __init__(self,filepath):
@@ -170,11 +176,16 @@ async def simulate(client):
                     client.model.model.load_weights(model_path)
                     
                     async with training_lock:
+                        #added
+                        pre_train_metrics = await asyncio.to_thread(client.model.evaluate)
+                        train_loss = pre_train_metrics["total_loss"]
+
                         await asyncio.to_thread(client.model.train, 1)
                         client_model_path = f"models/client{client.client_id}_model.keras"
                         client.model.model.save(client_model_path)
                         await ws.send("FILE")
                         await ws.send(str(client.samples))
+                        await ws.send(str(train_loss))
                         with open(client_model_path, "rb") as f:
                             await ws.send(f.read())
                         await ws.send("done")
@@ -213,7 +224,7 @@ async def simulate(client):
 
 async def main():
     clients = []
-    n = 3
+    n = 10
     for i in range(n): #no of sequential clients
         path = args.dataset + f"{i}.npz"
         client = Client(path)

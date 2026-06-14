@@ -225,13 +225,13 @@ class Model:
             print("Anomaly batch shape:", y_batch["anomaly"].shape)
             print("Disease batch shape:", y_batch["disease"].shape)
 
-        #steps_per_epoch = len(self.train_indices) // 16
+        steps_per_epoch = len(self.train_indices) // 16
 
         self.model.fit(
         train_ds,
         epochs=epochs,
-        #steps_per_epoch=steps_per_epoch,
-        verbose=1
+        steps_per_epoch=steps_per_epoch,
+        verbose=2
         )
 
     def evaluate(self):

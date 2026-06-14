@@ -11,12 +11,12 @@ import random
 import numpy as np
 import bcrypt
 from selector import RandomClientSelector
-from aggregator import FedAvg
+from aggregator import FedAvg, FedFV, qFedAvg, FedAdam
 
 #vars
-N = 5
-K = 3
-rounds_left = 3
+N = 10
+K = 10
+rounds_left = 10
 clients = set()
 app = FastAPI()
 current_round = 0
@@ -303,6 +303,11 @@ class FederatedServer:
             if msg == "FILE":
                 samples_str = await ws.receive_text()
                 samples = float(samples_str)
+
+                #added
+                loss_str = await ws.receive_text()
+                loss = float(loss_str)
+                
                 file_bytes = await ws.receive_bytes()
                 file_path = f"models/client_{client_id}_model_{current_round + 1}.keras"
                 with open(file_path, "wb") as f:
@@ -311,7 +316,7 @@ class FederatedServer:
                 done_msg = await ws.receive_text()
                 if done_msg == "done":
                     log_upload(client_id, file_path, samples)
-                    return (file_path, samples)
+                    return (file_path, samples, loss, client_id)
         except Exception as e:
             print(f"Error receiving from {client_id}: {e}")
         return None
@@ -334,13 +339,11 @@ class FederatedServer:
         print('starting aggregation')
         if len(self.client_uploads) > 0:
             current_round += 1
-            self.aggregator.aggregate(self.client_uploads, f"models/global_model_{current_round}.keras")
-            for file_path, _ in self.client_uploads:
+            self.aggregator.aggregate(self.client_uploads, f"models/global_model_{current_round}.keras",current_round)
+            for file_path, _, _, _ in self.client_uploads:
                 if os.path.exists(file_path):
                     os.remove(file_path)
-            old_model = f"models/global_model_{current_round - 1}.keras"
-            if os.path.exists(old_model):
-                os.remove(old_model)
+            
             print(f"Round {current_round} complete.")
             rounds_left -= 1
         self.client_uploads.clear()
