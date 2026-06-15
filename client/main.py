@@ -1,5 +1,6 @@
 import sys
 import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 import tensorflow as tf
 import requests
 import time
@@ -8,8 +9,6 @@ from model import Model
 import argparse
 import asyncio
 import json
-
-tf.config.set_visible_devices([], 'GPU')
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-d","--dataset", type=str, help="Path to dataset.npz")
@@ -190,6 +189,35 @@ async def simulate(client):
                             await ws.send(f.read())
                         await ws.send("done")
                     client.current_round += 1
+
+                elif msg == "train_fv":
+                    # --- ROUTINE B: PURE GRADIENT CONFLICT STRATEGIES (FedFV) ---
+                    print(f"[{client.client_id}] Gradient FedFV execution")
+                    model_bytes = await ws.recv()
+                    if isinstance(model_bytes, str): model_bytes = model_bytes.encode('utf-8')
+                    model_path = f"models/global_model_{client.client_id}.keras"
+                    with open(model_path, "wb") as f: f.write(model_bytes)
+                    client.model.model.load_weights(model_path)
+
+                    async with training_lock:
+                        # Extract un-Adamized raw structural updates using custom local loops
+                        local_grads, current_loss = await asyncio.to_thread(client.model.train_local_gradients_fv)
+                        
+                    payload = {
+                            "gradients": [g.tolist() for g in local_grads],
+                            "loss": current_loss,
+                            "samples": client.samples
+                        }
+                    await ws.send(json.dumps(payload))
+                        
+                        # Receive resolved steps back and apply manually
+                    server_response = await ws.recv()
+                    global_gradients = json.loads(server_response)
+                    async with training_lock:
+                        await asyncio.to_thread(client.model.apply_global_gradients_fv, global_gradients, server_lr=0.001)
+                    
+                    client.current_round += 1
+                    
                 elif msg == "eval":
                     print(f"[{client.client_id}] starting evaluation")
                     model_bytes = await ws.recv()

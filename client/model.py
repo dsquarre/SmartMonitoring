@@ -1,10 +1,6 @@
 import tensorflow as tf
 import numpy as np
-
-from sklearn.metrics import (
-    accuracy_score,
-    f1_score
-)
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 
 class Model:
 
@@ -34,63 +30,27 @@ class Model:
 
         inputs = tf.keras.Input(shape=(1000, 6))
 
-        x = tf.keras.layers.Conv1D(
-            64,
-            7,
-            padding='same',
-            activation='relu'
-        )(inputs)
-
+        x = tf.keras.layers.Conv1D(64, 7, padding='same', activation='relu')(inputs)
         x = tf.keras.layers.BatchNormalization()(x)
-
+        x = tf.keras.layers.MaxPooling1D(2)(x)
+        
+        x = tf.keras.layers.Conv1D(128, 5, padding='same', activation='relu')(x)
+        x = tf.keras.layers.BatchNormalization()(x)
         x = tf.keras.layers.MaxPooling1D(2)(x)
 
-        x = tf.keras.layers.Conv1D(
-            128,
-            5,
-            padding='same',
-            activation='relu'
-        )(x)
-
+        x = tf.keras.layers.Conv1D(256, 3, padding='same', activation='relu')(x)
         x = tf.keras.layers.BatchNormalization()(x)
-
-        x = tf.keras.layers.MaxPooling1D(2)(x)
-
-        x = tf.keras.layers.Conv1D(
-            256,
-            3,
-            padding='same',
-            activation='relu'
-        )(x)
-
-        x = tf.keras.layers.BatchNormalization()(x)
-
         x = tf.keras.layers.MaxPooling1D(2)(x)
 
         x = tf.keras.layers.SeparableConv1D(256,3,padding='same',activation='relu')(x)
-
         x = tf.keras.layers.BatchNormalization()(x)
-
         x = tf.keras.layers.GlobalAveragePooling1D()(x)
 
-        x = tf.keras.layers.Dense(
-            128,
-            activation='relu'
-        )(x)
-
+        x = tf.keras.layers.Dense(128, activation='relu')(x)
         x = tf.keras.layers.Dropout(0.4)(x)
 
-        anomaly_output = tf.keras.layers.Dense(
-            1,
-            activation='sigmoid',
-            name='anomaly'
-        )(x)
-
-        disease_output = tf.keras.layers.Dense(
-            4,
-            activation='softmax',
-            name='disease'
-        )(x)
+        anomaly_output = tf.keras.layers.Dense(1, activation='sigmoid', name='anomaly')(x)
+        disease_output = tf.keras.layers.Dense(4, activation='softmax', name='disease')(x)
 
         model = tf.keras.Model(
             inputs,
@@ -231,8 +191,89 @@ class Model:
         train_ds,
         epochs=epochs,
         steps_per_epoch=steps_per_epoch,
-        verbose=2
+        verbose=1
         )
+
+    def train_local_gradients_fv(self):
+        """
+        CUSTOM LOOP FOR FEDFV: Computes true, accumulated raw gradients 
+        across the local dataset without using any local adaptive optimizer.
+        """
+        # Initialize gradient accumulation matrices matching trainable weights shape
+        accumulated_grads = [np.zeros(var.shape, dtype=np.float32) for var in self.model.trainable_variables]
+        total_loss = 0.0
+        batch_count = 0
+
+        total_steps = len(self.train_indices) // 16
+        print(f"Beginning local FedFV Gradient Extraction ({total_steps} steps total)...")
+
+        # FIX 1: Added parentheses () to call the generator function
+        # FIX 2: Adjusted unpacking to match the generator's dictionary yield output structure
+        for X_batch, y_batch_dict in self.train_generator(batch_size=16):
+            
+            # Extract target vectors from the batch payload dictionary
+            y_anom = y_batch_dict["anomaly"]
+            y_dise = y_batch_dict["disease"]
+
+            with tf.GradientTape() as tape:
+                # Forward pass
+                predictions = self.model(X_batch, training=True)
+                
+                # FIX 3: Extracted dictionary values from the network's multi-output indices
+                # Predictions order mirrors your build_model definition: [anomaly_output, disease_output]
+                pred_anom = predictions[0]
+                pred_dise = predictions[1]
+                
+                # FIX 4: Aligned loss calculations with your specific build_model parameters
+                # Anomaly is binary classification (sigmoid) -> binary_crossentropy
+                # Disease is multi-class classification (softmax, 4 categories) -> categorical_crossentropy
+                loss_anom = tf.keras.losses.binary_crossentropy(y_anom, tf.squeeze(pred_anom, axis=-1))
+                loss_dise = tf.keras.losses.categorical_crossentropy(y_dise, pred_dise)
+                
+                batch_loss = tf.reduce_mean(loss_anom + loss_dise)
+
+            # Extract raw mathematical gradients
+            raw_grads = tape.gradient(batch_loss, self.model.trainable_variables)
+
+            # Accumulate across steps
+            for i, grad in enumerate(raw_grads):
+                if grad is not None:
+                    accumulated_grads[i] += grad.numpy()
+                    
+            total_loss += float(batch_loss)
+            batch_count += 1
+
+            if batch_count % 500 == 0 or batch_count == total_steps:
+                print(f"[Step {batch_count}/{total_steps}] Current Running Batch Loss: {float(batch_loss):.4f}")
+
+        # Avoid zero division if dataset is empty
+        if batch_count == 0:
+            return [np.zeros(var.shape) for var in self.model.trainable_variables], 0.0
+
+        # Calculate average global updates
+        average_grads = [g / batch_count for g in accumulated_grads]
+        average_loss = total_loss / batch_count
+
+        print(f"Finished Local Generation. Average Epoch Loss: {average_loss:.4f}")
+
+        return average_grads, average_loss
+
+    def apply_global_gradients_fv(self, global_gradients, server_lr=0.001):
+        """
+        Applies conflict-resolved global updates directly to the client's local 
+        trainable variables using element-wise array operations.
+        """
+        # Convert the decoded incoming gradients list to numpy arrays safely
+        native_gradients = [np.array(gg, dtype=np.float32) for gg in global_gradients]
+        
+        # FIX: Iterate and modify trainable_variables directly to respect the structural layout
+        for var, gg in zip(self.model.trainable_variables, native_gradients):
+            # Read current parameter matrix values, subtract scaled gradient, and update variable inplace
+            current_value = var.read_value().numpy()
+            updated_value = current_value - (server_lr * gg)
+            var.assign(updated_value)
+            
+        print(f"Successfully applied optimized global gradients.")
 
     def evaluate(self):
 
@@ -292,19 +333,41 @@ class Model:
         )
         
         metrics = {
-
             "total_loss": results["loss"],
-
+    
+            # --- Anomaly Metrics (Binary) ---
             "anomaly_accuracy": accuracy_score(
                 true_anom,
                 pred_anom
             ),
-
+            "anomaly_precision": precision_score(
+                true_anom,
+                pred_anom,
+                zero_division=0
+            ),
+            "anomaly_recall": recall_score(
+                true_anom,
+                pred_anom,
+                zero_division=0
+            ),
+    
+            # --- Disease Metrics (Multi-class) ---
             "disease_accuracy": accuracy_score(
                 true_dis,
                 pred_dis
             ),
-
+            "disease_precision": precision_score(
+                true_dis,
+                pred_dis,
+                average='weighted',
+                zero_division=0
+            ),
+            "disease_recall": recall_score(
+                true_dis,
+                pred_dis,
+                average='weighted',
+                zero_division=0
+            ),
             "disease_f1": f1_score(
                 true_dis,
                 pred_dis,

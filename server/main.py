@@ -10,8 +10,13 @@ from collections import deque
 import random
 import numpy as np
 import bcrypt
+import shutil
 from selector import RandomClientSelector
 from aggregator import FedAvg, FedFV, qFedAvg, FedAdam
+
+
+client_id_map = {}
+next_numeric_id = 0
 
 #vars
 N = 10
@@ -22,7 +27,6 @@ app = FastAPI()
 current_round = 0
 client_metrics = deque()
 round_history = []
-
 
 os.makedirs('models', exist_ok=True)
 
@@ -50,8 +54,6 @@ def log_upload(client_id, filename, weight):
     with open('upload_log.csv', 'a', newline='') as f:
         writer = csv.writer(f)
         writer.writerow([datetime.now().isoformat(), client_id, filename, weight, current_round + 1])
-
-
 
 
 def evaluate():
@@ -182,11 +184,17 @@ def authenticate(password):
 
 @app.post("/")
 async def root(psswd: str = Body(...),):
+    global next_numeric_id, client_id_map, clients
     if not psswd or not authenticate(psswd):
         print('invalid password attempt')
         return {"message": "Welcome to the Federated Learning Server."}
     id = generate_id()
     clients.add(id)
+    #added
+    if id not in client_id_map:
+        client_id_map[id] = next_numeric_id
+        next_numeric_id += 1
+    
     print(f"Client {id} connected. Total clients: {len(clients)}")
     return {"your_id": id}
 
@@ -197,7 +205,7 @@ class FederatedServer:
         self.client_uploads = []
         self.is_running = False
         self.selector = selector or RandomClientSelector()
-        self.aggregator = aggregator or FedAvg()
+        self.aggregator = aggregator or FedAvg() or FedFV(num_clients=K, alpha=0.1, tau=1)
 
     async def connect(self, client_id, websocket: WebSocket):
         self.clients[client_id] = websocket
@@ -221,10 +229,13 @@ class FederatedServer:
             selected_set = set(selected_ids)
             print(f"Selected clients for training: {selected_ids}")
 
+            #added
+            command = "train_fv" if self.aggregator.mode == "gradients" else "train"
+
             send_tasks = []
             for client_id, ws in self.clients.items():
                 if client_id in selected_set:
-                    send_tasks.append(ws.send_text("train"))
+                    send_tasks.append(ws.send_text(command))
                 else:
                     send_tasks.append(ws.send_text("wait"))
             await asyncio.gather(*send_tasks)
@@ -239,19 +250,58 @@ class FederatedServer:
                 send_model_tasks.append(ws.send_bytes(model_bytes))
             await asyncio.gather(*send_model_tasks)
 
-            recv_tasks = []
-            for client_id in selected_ids:
-                ws = self.clients[client_id]
-                recv_tasks.append(self.receive_model(client_id, ws))
+            if self.aggregator.mode == "gradients":
+                # Receive pure un-Adamized gradient payloads
+                recv_tasks = [self.receive_raw_gradients(cid, self.clients[cid]) for cid in selected_ids]
+                results = await asyncio.gather(*recv_tasks)
+                self.client_uploads = [r for r in results if r is not None]
+                
+                current_round += 1
+                next_global_model_path = f"models/global_model_{current_round}.keras"
+                shutil.copyfile(model_path, next_global_model_path) # Prepare file target destination
+                
+                # Execute FedFV aggregation algorithm
+                global_gt = self.aggregator.aggregate(
+                    self.client_uploads, next_global_model_path, current_round, ModelClass=Model
+                )
+                
+                # Manually process server weight optimization updates locally
+                global_model = Model()
+                global_model.model.load_weights(next_global_model_path)
+                
+                # FIX: Iterate and update trainable_variables directly instead of get_weights()
+                for var, gg in zip(global_model.model.trainable_variables, global_gt):
+                    # Perform element-wise subtraction directly on the tensor's underlying numpy array
+                    var.assign(var.read_value() - gg)
+                
+                # Save the properly modified model file
+                global_model.model.save(next_global_model_path)
 
-            results = await asyncio.gather(*recv_tasks)
+                # Broadcast final updates back to clients to finish their loop sequence
+                serialized_global_grad = json.dumps([g.tolist() for g in global_gt])
+                broadcast_tasks = [self.clients[cid].send_text(serialized_global_grad) for cid in selected_ids]
+                await asyncio.gather(*broadcast_tasks)
+                
+                print(f"Round {current_round} complete.")
+                rounds_left -= 1
+                self.client_uploads.clear()
 
-            for res in results:
-                if res:
-                    self.client_uploads.append(res)
+            else:
+                # Fall back to standard serialized weight transfers (.keras files)
+                recv_tasks = []
+                for client_id in selected_ids:
+                    ws = self.clients[client_id]
+                    recv_tasks.append(self.receive_model(client_id, ws))
 
-            self.agg()
+                results = await asyncio.gather(*recv_tasks)
+                for res in results:
+                    if res:
+                        self.client_uploads.append(res)
 
+                # Delegate directly to your original aggregation function layout
+                self.agg()
+
+            # 4. Standard Evaluation Flow (Kept Uniform)
             print("Starting evaluation for the round.")
             eval_send_tasks = []
             for client_id, ws in self.clients.items():
@@ -295,6 +345,18 @@ class FederatedServer:
             exit_tasks.append(ws.send_text("exit"))
         await asyncio.gather(*exit_tasks)
         self.is_running = False
+
+    async def receive_raw_gradients(self, client_id, ws: WebSocket):
+        global client_id_map
+        try:
+            json_data = await ws.receive_text()
+            data = json.loads(json_data)
+            client_grads = [np.array(g) for g in data["gradients"]]
+            print(f"[SERVER] Successfully received raw gradients from client {client_id}")
+            return (client_grads, float(data["samples"]), float(data["loss"]), client_id_map[client_id])
+        except Exception as e:
+            print(f"Error reading raw gradients from {client_id}: {e}")
+            return None
 
     async def receive_model(self, client_id, ws: WebSocket):
         global current_round
