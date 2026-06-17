@@ -1,5 +1,6 @@
 import sys
 import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 import tensorflow as tf
 import requests
 import time
@@ -8,6 +9,7 @@ from model import Model
 import argparse
 import asyncio
 import json
+
 parser = argparse.ArgumentParser()
 parser.add_argument("-d","--dataset", type=str, help="Path to dataset.npz")
 args = parser.parse_args()
@@ -21,6 +23,9 @@ os.makedirs('models', exist_ok=True)
 os.makedirs('metrics', exist_ok=True)
 import websockets
 import asyncio
+
+tf.config.set_visible_devices([], 'GPU')
+
 #client specific methods here
 class Client:
     def __init__(self,filepath):
@@ -170,15 +175,49 @@ async def simulate(client):
                     client.model.model.load_weights(model_path)
                     
                     async with training_lock:
+                        #added
+                        pre_train_metrics = await asyncio.to_thread(client.model.evaluate)
+                        train_loss = pre_train_metrics["total_loss"]
+
                         await asyncio.to_thread(client.model.train, 1)
                         client_model_path = f"models/client{client.client_id}_model.keras"
                         client.model.model.save(client_model_path)
                         await ws.send("FILE")
                         await ws.send(str(client.samples))
+                        await ws.send(str(train_loss))
                         with open(client_model_path, "rb") as f:
                             await ws.send(f.read())
                         await ws.send("done")
                     client.current_round += 1
+
+                elif msg == "train_fv":
+                    # --- ROUTINE B: PURE GRADIENT CONFLICT STRATEGIES (FedFV) ---
+                    print(f"[{client.client_id}] Gradient FedFV execution")
+                    model_bytes = await ws.recv()
+                    if isinstance(model_bytes, str): model_bytes = model_bytes.encode('utf-8')
+                    model_path = f"models/global_model_{client.client_id}.keras"
+                    with open(model_path, "wb") as f: f.write(model_bytes)
+                    client.model.model.load_weights(model_path)
+
+                    async with training_lock:
+                        # Extract un-Adamized raw structural updates using custom local loops
+                        local_grads, current_loss = await asyncio.to_thread(client.model.train_local_gradients_fv)
+                        
+                    payload = {
+                            "gradients": [g.tolist() for g in local_grads],
+                            "loss": current_loss,
+                            "samples": client.samples
+                        }
+                    await ws.send(json.dumps(payload))
+                        
+                        # Receive resolved steps back and apply manually
+                    server_response = await ws.recv()
+                    global_gradients = json.loads(server_response)
+                    async with training_lock:
+                        await asyncio.to_thread(client.model.apply_global_gradients_fv, global_gradients, server_lr=0.001)
+                    
+                    client.current_round += 1
+                    
                 elif msg == "eval":
                     print(f"[{client.client_id}] starting evaluation")
                     model_bytes = await ws.recv()
@@ -213,7 +252,7 @@ async def simulate(client):
 
 async def main():
     clients = []
-    n = 3
+    n = 10
     for i in range(n): #no of sequential clients
         path = args.dataset + f"{i}.npz"
         client = Client(path)
