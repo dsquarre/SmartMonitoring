@@ -11,8 +11,10 @@ import random
 import numpy as np
 import bcrypt
 import shutil
-from selector import RandomClientSelector
+import time
+from selector import RandomClientSelector, RLClientSelector, RandomRLAgent
 from aggregator import FedAvg, FedFV, qFedAvg, FedAdam
+from rl_env import FederatedEnv
 
 
 client_id_map = {}
@@ -183,19 +185,31 @@ def authenticate(password):
         return False
 
 @app.post("/")
-async def root(psswd: str = Body(...),):
+async def root(payload: dict = Body(...)):
     global next_numeric_id, client_id_map, clients
+    psswd = payload.get("password")
+    specs = payload.get("specs", {})
+    
     if not psswd or not authenticate(psswd):
         print('invalid password attempt')
         return {"message": "Welcome to the Federated Learning Server."}
+        
     id = generate_id()
     clients.add(id)
-    #added
-    if id not in client_id_map:
-        client_id_map[id] = next_numeric_id
-        next_numeric_id += 1
     
-    print(f"Client {id} connected. Total clients: {len(clients)}")
+    if id not in client_id_map:
+        num_id = next_numeric_id
+        client_id_map[id] = num_id
+        next_numeric_id += 1
+        
+        # Save client specs to profile database dynamically!
+        manager.env.profiles[num_id] = {
+            "cpu_frequency": float(specs.get("cpu_frequency", 2.0e9)),
+            "tx_power": float(specs.get("tx_power", 0.2)),
+            "r_trans": 15e6  # Default baseline upload bandwidth: 15 Mbps
+        }
+    
+    print(f"Client {id} registered with specs: {specs}. Connected: {len(clients)}")
     return {"your_id": id}
 
 
@@ -204,7 +218,24 @@ class FederatedServer:
         self.clients = {}
         self.client_uploads = []
         self.is_running = False
-        self.selector = selector or RandomClientSelector()
+        
+        # Initialize BEFL Environment and Client Profiles
+        profiles = {
+            i: {
+                "cpu_frequency": float(random.choice([1.2e9, 1.6e9, 2.0e9, 2.4e9, 2.8e9])),
+                "tx_power": float(random.choice([0.1, 0.2, 0.3, 0.4, 0.5])),
+                "r_trans": float(random.choice([5e6, 10e6, 15e6, 20e6, 30e6]))
+            }
+            for i in range(100)
+        }
+        self.env = FederatedEnv(profiles, model_size_bits=10_000_000)
+        self.agent = RandomRLAgent()
+        
+        # DB to track latest client metrics persistently
+        self.client_samples_db = {}
+        self.client_losses_db = {}
+        
+        self.selector = selector or RLClientSelector(self.agent, self.env)
         self.aggregator = aggregator or FedAvg() or FedFV(num_clients=K, alpha=0.1, tau=1)
 
     async def connect(self, client_id, websocket: WebSocket):
@@ -225,7 +256,15 @@ class FederatedServer:
             self.client_uploads = []
 
             client_ids = list(self.clients.keys())
-            selected_ids = self.selector.select_clients(client_ids, K, context={"round": current_round + 1})
+            
+            # Pass profiles and dynamic metrics database in context
+            context = {
+                "round": current_round + 1,
+                "client_id_map": client_id_map,
+                "client_samples": self.client_samples_db,
+                "client_losses": self.client_losses_db
+            }
+            selected_ids = self.selector.select_clients(client_ids, K, context=context)
             selected_set = set(selected_ids)
             print(f"Selected clients for training: {selected_ids}")
 
@@ -250,10 +289,18 @@ class FederatedServer:
                 send_model_tasks.append(ws.send_bytes(model_bytes))
             await asyncio.gather(*send_model_tasks)
 
+            # Track response roundtrip times for selected clients
+            roundtrips = {}
+
             if self.aggregator.mode == "gradients":
                 # Receive pure un-Adamized gradient payloads
+                start_time = time.time()
                 recv_tasks = [self.receive_raw_gradients(cid, self.clients[cid]) for cid in selected_ids]
                 results = await asyncio.gather(*recv_tasks)
+                elapsed = time.time() - start_time
+                for cid in selected_ids:
+                    roundtrips[cid] = elapsed
+                    
                 self.client_uploads = [r for r in results if r is not None]
                 
                 current_round += 1
@@ -288,12 +335,17 @@ class FederatedServer:
 
             else:
                 # Fall back to standard serialized weight transfers (.keras files)
+                start_time = time.time()
                 recv_tasks = []
                 for client_id in selected_ids:
                     ws = self.clients[client_id]
                     recv_tasks.append(self.receive_model(client_id, ws))
 
                 results = await asyncio.gather(*recv_tasks)
+                elapsed = time.time() - start_time
+                for cid in selected_ids:
+                    roundtrips[cid] = elapsed
+                    
                 for res in results:
                     if res:
                         self.client_uploads.append(res)
@@ -325,6 +377,41 @@ class FederatedServer:
 
             evaluate()
 
+            # --- RL Training Step ---
+            current_loss = round_history[-1]["total_loss"] if round_history else 1.0
+            prev_loss = round_history[-2]["total_loss"] if len(round_history) > 1 else current_loss
+            global_loss_delta = prev_loss - current_loss
+            
+            selected_metrics = {}
+            for cid in selected_ids:
+                num_id = client_id_map.get(cid, 0)
+                samples = self.client_samples_db.get(cid, 1000)
+                measured_rt = roundtrips.get(cid, None)
+                selected_metrics[num_id] = self.env.compute_client_cost(num_id, samples, measured_rt)
+                
+            local_losses = [self.client_losses_db.get(cid, 1.0) for cid in selected_ids]
+            reward = self.env.calculate_reward(selected_metrics, global_loss_delta, local_losses)
+            print(f"[RL Environment] Round {current_round} Stats:")
+            print(f"  - Delta Global Loss: {global_loss_delta:.4f}")
+            if selected_metrics:
+                print(f"  - Slowest Latency: {max(m['t_total'] for m in selected_metrics.values()):.4f} s")
+                print(f"  - Total Energy: {sum(m['E_total'] for m in selected_metrics.values()):.6f} J")
+            print(f"  - Calculated Reward: {reward:.4f}")
+
+            if isinstance(self.selector, RLClientSelector):
+                next_context = {
+                    "client_id_map": client_id_map,
+                    "client_samples": self.client_samples_db,
+                    "client_losses": self.client_losses_db
+                }
+                next_state = self.selector._build_state(client_ids, next_context)
+                self.selector.agent.update(
+                    self.selector.last_state, 
+                    self.selector.last_action, 
+                    reward, 
+                    next_state
+                )
+
             if round_history:
                 latest_metrics = round_history[-1]
                 metrics_payload = json.dumps(latest_metrics)
@@ -353,6 +440,11 @@ class FederatedServer:
             data = json.loads(json_data)
             client_grads = [np.array(g) for g in data["gradients"]]
             print(f"[SERVER] Successfully received raw gradients from client {client_id}")
+            
+            # Update dynamic metrics DB
+            self.client_samples_db[client_id] = float(data["samples"])
+            self.client_losses_db[client_id] = float(data["loss"])
+            
             return (client_grads, float(data["samples"]), float(data["loss"]), client_id_map[client_id])
         except Exception as e:
             print(f"Error reading raw gradients from {client_id}: {e}")
@@ -369,6 +461,10 @@ class FederatedServer:
                 #added
                 loss_str = await ws.receive_text()
                 loss = float(loss_str)
+                
+                # Update dynamic metrics DB
+                self.client_samples_db[client_id] = samples
+                self.client_losses_db[client_id] = loss
                 
                 file_bytes = await ws.receive_bytes()
                 file_path = f"models/client_{client_id}_model_{current_round + 1}.keras"
@@ -393,6 +489,10 @@ class FederatedServer:
                 metrics_str = await ws.receive_text()
                 local_metrics = json.loads(metrics_str)
                 client_metrics.append((local_metrics, samples))
+                
+                # Update dynamic metrics DB
+                self.client_samples_db[client_id] = samples
+                self.client_losses_db[client_id] = local_metrics.get("total_loss", 1.0)
         except Exception as e:
             print(f"Error receiving eval from {client_id}: {e}")
 

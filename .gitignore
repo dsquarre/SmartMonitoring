@@ -1,1 +1,10 @@
 data
+__pycache__
+*.bak
+*.png
+*.jpeg
+*.jpg
+*.pt
+*.npz
+*.keras
+

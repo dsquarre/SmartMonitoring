@@ -9,6 +9,8 @@ from model import Model
 import argparse
 import asyncio
 import json
+import platform
+import subprocess
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-d","--dataset", type=str, help="Path to dataset.npz")
@@ -25,6 +27,35 @@ import websockets
 import asyncio
 
 tf.config.set_visible_devices([], 'GPU')
+
+def detect_device_specs():
+    cpu_freq = 2.0e9  # Fallback standard: 2.0 GHz
+    system_name = platform.system()
+    try:
+        if system_name == "Linux":
+            try:
+                with open("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq", "r") as f:
+                    khz = float(f.read().strip())
+                    cpu_freq = khz * 1e3
+            except Exception:
+                out = subprocess.check_output("lscpu | grep 'CPU max MHz'", shell=True).decode()
+                mhz = float(out.split(":")[-1].strip())
+                cpu_freq = mhz * 1e6
+        elif system_name == "Windows":
+            out = subprocess.check_output("wmic cpu get MaxClockSpeed", shell=True).decode()
+            lines = [line.strip() for line in out.splitlines() if line.strip()]
+            if len(lines) > 1:
+                mhz = float(lines[1])
+                cpu_freq = mhz * 1e6
+        elif system_name == "Darwin":
+            out = subprocess.check_output("sysctl -n hw.cpufreq", shell=True).decode()
+            cpu_freq = float(out.strip())
+    except Exception as e:
+        print(f"[Device Specs] Automated detection failed, utilizing default values: {e}")
+    return {
+        "cpu_frequency": cpu_freq,
+        "tx_power": 0.2
+    }
 
 #client specific methods here
 class Client:
@@ -43,7 +74,12 @@ class Client:
             psswd = f.read().strip()
         url = f"{server_url}/"
         try:
-            response = requests.post(url,json=psswd)
+            specs = detect_device_specs()
+            payload = {
+                "password": psswd,
+                "specs": specs
+            }
+            response = requests.post(url, json=payload)
             if response.status_code == 200:
                 auth_info = response.json()
                 self.client_id = auth_info.get("your_id", None)
