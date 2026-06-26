@@ -12,7 +12,7 @@ import numpy as np
 import bcrypt
 import shutil
 import time
-from selector import RandomClientSelector, RLClientSelector, RandomRLAgent
+from selector import RandomClientSelector, RLClientSelector, RandomRLAgent, QLearningAgent
 from aggregator import FedAvg, FedFV, qFedAvg, FedAdam
 from rl_env import FederatedEnv
 
@@ -229,7 +229,7 @@ class FederatedServer:
             for i in range(100)
         }
         self.env = FederatedEnv(profiles, model_size_bits=10_000_000)
-        self.agent = RandomRLAgent()
+        self.agent = QLearningAgent()
         
         # DB to track latest client metrics persistently
         self.client_samples_db = {}
@@ -260,6 +260,8 @@ class FederatedServer:
             # Pass profiles and dynamic metrics database in context
             context = {
                 "round": current_round + 1,
+                "rounds_left": rounds_left,
+                "env": self.env,
                 "client_id_map": client_id_map,
                 "client_samples": self.client_samples_db,
                 "client_losses": self.client_losses_db
@@ -400,6 +402,9 @@ class FederatedServer:
 
             if isinstance(self.selector, RLClientSelector):
                 next_context = {
+                    "round": current_round,
+                    "rounds_left": rounds_left,
+                    "env": self.env,
                     "client_id_map": client_id_map,
                     "client_samples": self.client_samples_db,
                     "client_losses": self.client_losses_db
@@ -409,7 +414,8 @@ class FederatedServer:
                     self.selector.last_state, 
                     self.selector.last_action, 
                     reward, 
-                    next_state
+                    next_state,
+                    context=next_context
                 )
 
             if round_history:
