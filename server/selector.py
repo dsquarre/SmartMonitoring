@@ -49,6 +49,7 @@ class RandomRLAgent(BaseRLAgent):
     """A baseline Random Agent that fits the interface."""
     def get_action(self, state: np.ndarray, num_clients: int, k: int, context: Dict[str, Any] = None) -> List[int]:
         indices = list(range(num_clients))
+        print("using random RL")
         return list(np.random.choice(indices, size=k, replace=False))
 
     def update(self, state: np.ndarray, action: List[int], reward: float, next_state: np.ndarray, context: Dict[str, Any] = None):
@@ -114,6 +115,7 @@ class QLearningAgent(BaseRLAgent):
         return f"{stage} | " + ",".join(client_states)
 
     def get_action(self, state: np.ndarray, num_clients: int, k: int, context: Dict[str, Any] = None) -> List[int]:
+        print("using qlearning")
         context = context or {}
         state_str = self._discretize_state(state, num_clients, context)
         combinations = self._get_combinations(num_clients, k)

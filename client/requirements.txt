@@ -5,3 +5,4 @@ scikit-learn
 websockets
 matplotlib
 seaborn
+codecarbon

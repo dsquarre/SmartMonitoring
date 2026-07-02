@@ -11,6 +11,7 @@ import asyncio
 import json
 import platform
 import subprocess
+from codecarbon import EmissionsTracker
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-d","--dataset", type=str, help="Path to dataset.npz")
@@ -27,6 +28,13 @@ import websockets
 import asyncio
 
 tf.config.set_visible_devices([], 'GPU')
+
+def start_carbon_tracker(tracker):
+    tracker.start()
+
+def stop_carbon_tracker(tracker):
+    return tracker.stop()
+
 
 def detect_device_specs():
     cpu_freq = 2.0e9  # Fallback standard: 2.0 GHz
@@ -214,13 +222,31 @@ async def simulate(client):
                         #added
                         pre_train_metrics = await asyncio.to_thread(client.model.evaluate)
                         train_loss = pre_train_metrics["total_loss"]
+                        # Initialize tracking configurations cleanly
+                        tracker = EmissionsTracker(project_name=f"client_{client.client_id}_round", save_to_file=False, log_level="error")
+
+                        # Start tracking inside a background executor thread
+                        await asyncio.to_thread(start_carbon_tracker, tracker)
+                        start_time = time.perf_counter()
 
                         await asyncio.to_thread(client.model.train, 1)
+
+                        comp_latency = time.perf_counter() - start_time
+                        # Stop tracking and fetch calculated energy values
+                        await asyncio.to_thread(stop_carbon_tracker, tracker)
+                        
+                        # CodeCarbon tracks energy in kWh, convert to Joules (1 kWh = 3,600,000 Joules)
+                        actual_energy_joules = tracker._total_energy.kWh * 3.6e6 if tracker._total_energy else 0.0
+
                         client_model_path = f"models/client{client.client_id}_model.keras"
                         client.model.model.save(client_model_path)
                         await ws.send("FILE")
                         await ws.send(str(client.samples))
                         await ws.send(str(train_loss))
+
+                        await ws.send(str(comp_latency))
+                        await ws.send(str(actual_energy_joules))
+                        
                         with open(client_model_path, "rb") as f:
                             await ws.send(f.read())
                         await ws.send("done")
@@ -236,17 +262,27 @@ async def simulate(client):
                     client.model.model.load_weights(model_path)
 
                     async with training_lock:
+                        # Initialize tracking configurations cleanly
+                        tracker = EmissionsTracker(project_name=f"client_{client.client_id}_round", save_to_file=False, log_level="error")
+                        await asyncio.to_thread(start_carbon_tracker, tracker)
+                        start_time = time.perf_counter()
                         # Extract un-Adamized raw structural updates using custom local loops
                         local_grads, current_loss = await asyncio.to_thread(client.model.train_local_gradients_fv)
+
+                        comp_latency = time.perf_counter() - start_time
+                        await asyncio.to_thread(stop_carbon_tracker, tracker)
+                        actual_energy_joules = tracker._total_energy.kWh * 3.6e6 if tracker._total_energy else 0.0
                         
                     payload = {
-                            "gradients": [g.tolist() for g in local_grads],
-                            "loss": current_loss,
-                            "samples": client.samples
-                        }
+                        "gradients": [g.tolist() for g in local_grads],
+                        "loss": current_loss,
+                        "samples": client.samples,
+                        "comp_latency": comp_latency,
+                        "measured_energy": actual_energy_joules
+                    }
                     await ws.send(json.dumps(payload))
                         
-                        # Receive resolved steps back and apply manually
+                    # Receive resolved steps back and apply manually
                     server_response = await ws.recv()
                     global_gradients = json.loads(server_response)
                     async with training_lock:

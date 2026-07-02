@@ -22,7 +22,7 @@ next_numeric_id = 0
 
 #vars
 N = 10
-K = 10
+K = 3
 rounds_left = 10
 clients = set()
 app = FastAPI()
@@ -58,7 +58,7 @@ def log_upload(client_id, filename, weight):
         writer.writerow([datetime.now().isoformat(), client_id, filename, weight, current_round + 1])
 
 
-def evaluate():
+def evaluate(current_round_uploads):
     global client_metrics, current_round, round_history, N
     #print(client_metrics)
     #client_metrics is a deque of tuple (local_metrics,samples)->(dict,int)
@@ -72,6 +72,21 @@ def evaluate():
                 weighted_metric += (metrics[metric]* (samples/total_samples))
             round_metrics[metric] = weighted_metric
         round_metrics["round"] = current_round
+
+        if current_round_uploads:
+            total_latencies = [upload[4] for upload in current_round_uploads if upload]
+            total_energies = [upload[5] for upload in current_round_uploads if upload]
+            
+            round_metrics["avg_comp_latency"] = np.mean(total_latencies)
+            round_metrics["max_comp_latency"] = np.max(total_latencies)
+            round_metrics["avg_energy_consumed"] = np.mean(total_energies)
+            round_metrics["total_round_energy"] = np.sum(total_energies)
+        else:
+            round_metrics["avg_comp_latency"] = 0.0
+            round_metrics["max_comp_latency"] = 0.0
+            round_metrics["avg_energy_consumed"] = 0.0
+            round_metrics["total_round_energy"] = 0.0
+
         round_history.append(round_metrics)
         with open("global_metrics.txt", "a") as f:
             f.write(str(round_metrics) + "\n")
@@ -150,6 +165,26 @@ def plot_metrics():
     plt.close()
 
     print("Metric plots saved.")
+
+    fig, ax1 = plt.subplots(figsize=(8, 5))
+
+    color = 'tab:red'
+    ax1.set_xlabel('Federated Round')
+    ax1.set_ylabel('Avg Latency (seconds)', color=color)
+    ax1.plot(rounds, [x.get("avg_comp_latency", 0) for x in round_history], marker='o', color=color, label='Latency')
+    ax1.tick_params(axis='y', labelcolor=color)
+
+    ax2 = ax1.twinx()  # Instantiate a second axes that shares the same x-axis
+    color = 'tab:green'
+    ax2.set_ylabel('Total Round Energy (Joules)', color=color)
+    ax2.plot(rounds, [x.get("total_round_energy", 0) for x in round_history], marker='s', color=color, label='Energy')
+    ax2.tick_params(axis='y', labelcolor=color)
+
+    plt.title("System Resource Profile vs Federated Round")
+    fig.tight_layout()
+    plt.grid(True, linestyle=':')
+    plt.savefig("system_resources_vs_round.png")
+    plt.close()
 
 """
 client_metrics format:
@@ -333,6 +368,7 @@ class FederatedServer:
                 
                 print(f"Round {current_round} complete.")
                 rounds_left -= 1
+                uploads_snapshot = list(self.client_uploads)
                 self.client_uploads.clear()
 
             else:
@@ -351,6 +387,7 @@ class FederatedServer:
                 for res in results:
                     if res:
                         self.client_uploads.append(res)
+                uploads_snapshot = list(self.client_uploads)
 
                 # Delegate directly to your original aggregation function layout
                 self.agg()
@@ -377,7 +414,7 @@ class FederatedServer:
 
             await asyncio.gather(*eval_recv_tasks)
 
-            evaluate()
+            evaluate(uploads_snapshot)
 
             # --- RL Training Step ---
             current_loss = round_history[-1]["total_loss"] if round_history else 1.0
@@ -451,7 +488,7 @@ class FederatedServer:
             self.client_samples_db[client_id] = float(data["samples"])
             self.client_losses_db[client_id] = float(data["loss"])
             
-            return (client_grads, float(data["samples"]), float(data["loss"]), client_id_map[client_id])
+            return (client_grads, float(data["samples"]), float(data["loss"]), client_id_map[client_id], comp_latency, measured_energy)
         except Exception as e:
             print(f"Error reading raw gradients from {client_id}: {e}")
             return None
@@ -467,6 +504,12 @@ class FederatedServer:
                 #added
                 loss_str = await ws.receive_text()
                 loss = float(loss_str)
+
+                comp_latency_str = await ws.receive_text()
+                comp_latency = float(comp_latency_str)
+                
+                measured_energy_str = await ws.receive_text()
+                measured_energy = float(measured_energy_str)
                 
                 # Update dynamic metrics DB
                 self.client_samples_db[client_id] = samples
@@ -480,7 +523,7 @@ class FederatedServer:
                 done_msg = await ws.receive_text()
                 if done_msg == "done":
                     log_upload(client_id, file_path, samples)
-                    return (file_path, samples, loss, client_id)
+                    return (file_path, samples, loss, client_id, comp_latency, measured_energy)
         except Exception as e:
             print(f"Error receiving from {client_id}: {e}")
         return None
@@ -508,7 +551,7 @@ class FederatedServer:
         if len(self.client_uploads) > 0:
             current_round += 1
             self.aggregator.aggregate(self.client_uploads, f"models/global_model_{current_round}.keras",current_round)
-            for file_path, _, _, _ in self.client_uploads:
+            for file_path, *_, _, _ in self.client_uploads:
                 if os.path.exists(file_path):
                     os.remove(file_path)
             
