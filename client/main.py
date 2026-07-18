@@ -210,9 +210,12 @@ async def simulate(client):
                 msg = await ws.recv()
                 if msg == "train":
                     print(f"[{client.client_id}] selected for training")
+
+                    download_start = time.perf_counter()
                     model_bytes = await ws.recv()
                     if isinstance(model_bytes, str):
                         model_bytes = model_bytes.encode('utf-8')
+                    download_latency = time.perf_counter() - download_start
                     model_path = f"models/global_model_{client.client_id}.keras"
                     with open(model_path, "wb") as f:
                         f.write(model_bytes)
@@ -240,16 +243,20 @@ async def simulate(client):
 
                         client_model_path = f"models/client{client.client_id}_model.keras"
                         client.model.model.save(client_model_path)
+                        upload_start = time.perf_counter()
                         await ws.send("FILE")
                         await ws.send(str(client.samples))
                         await ws.send(str(train_loss))
 
                         await ws.send(str(comp_latency))
                         await ws.send(str(actual_energy_joules))
+                        await ws.send(str(download_latency))
                         
                         with open(client_model_path, "rb") as f:
                             await ws.send(f.read())
                         await ws.send("done")
+                        upload_latency = time.perf_counter() - upload_start
+                        print(f"Download: {download_latency:.4f}s | Upload: {upload_latency:.4f}s")
                     client.current_round += 1
 
                 elif msg == "train_fv":

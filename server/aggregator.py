@@ -34,10 +34,10 @@ class FedAvg(ModelAggregator):
     def aggregate(self, client_data, global_model_path, current_round):
         print("Using FedAvg")
         global_model = Model()
-        total_samples = sum(samples for _, samples, _, _, _, _ in client_data)
+        total_samples = sum(samples for _, samples, *_, _ in client_data)
 
         aggregated_weights = None
-        for model_path, client_samples, _, _, _, _ in client_data:
+        for model_path, client_samples, *_, _ in client_data:
             local_model = Model()
             local_model.model.load_weights(model_path)
             local_weights = local_model.model.get_weights()
@@ -63,14 +63,14 @@ class qFedAvg(ModelAggregator):
         global_model = Model()
         raw_weights = []
 
-        for (model_path, samples, loss, client_id, _, _) in client_data:
+        for (model_path, samples, loss, client_id, *_, _) in client_data:
             raw_weight = (samples *((loss + 1e-10) ** self.q))
             raw_weights.append(raw_weight)
         total_weight = sum(raw_weights)
         aggregated_weights = None
 
         print("Using qFedAvg")
-        for idx, (model_path, samples, loss, client_id, _, _) in enumerate(client_data):
+        for idx, (model_path, samples, loss, client_id, *_, _) in enumerate(client_data):
             client_weight = (raw_weights[idx] / total_weight)
             local_model = Model()
             local_model.model.load_weights(model_path)
@@ -116,7 +116,7 @@ class FedFV(ModelAggregator):
         losses = []
         client_ids = []
         
-        for (client_grads, samples, loss, numeric_id, _, _) in client_data:
+        for (client_grads, samples, loss, numeric_id, *_, _) in client_data:
             gradients.append(client_grads)
             losses.append(loss)
             client_ids.append(numeric_id)
@@ -231,10 +231,10 @@ class FedAdam(ModelAggregator):
 
         global_model.model.load_weights(self.previous_global_model)
         global_weights = (global_model.model.get_weights())
-        total_samples = sum(samples for _, samples, _, _, _, _ in client_data)
+        total_samples = sum(samples for _, samples, *_, _ in client_data)
         aggregated_gradient = [np.zeros_like(layer) for layer in global_weights]
 
-        for (model_path,samples,loss,client_id, _, _) in client_data:
+        for (model_path,samples,loss,client_id, *_, _) in client_data:
             local_model = Model()
             local_model.model.load_weights(model_path)
             local_weights = (local_model.model.get_weights())

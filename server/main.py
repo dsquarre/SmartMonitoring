@@ -23,7 +23,7 @@ next_numeric_id = 0
 #vars
 N = 10
 K = 3
-rounds_left = 10
+rounds_left = 2
 clients = set()
 app = FastAPI()
 current_round = 0
@@ -76,16 +76,19 @@ def evaluate(current_round_uploads):
         if current_round_uploads:
             total_latencies = [upload[4] for upload in current_round_uploads if upload]
             total_energies = [upload[5] for upload in current_round_uploads if upload]
+            total_dl_latencies = [upload[6] for upload in current_round_uploads if upload and len(upload) > 6]
             
             round_metrics["avg_comp_latency"] = np.mean(total_latencies)
             round_metrics["max_comp_latency"] = np.max(total_latencies)
             round_metrics["avg_energy_consumed"] = np.mean(total_energies)
             round_metrics["total_round_energy"] = np.sum(total_energies)
+            round_metrics["avg_download_latency"] = np.mean(total_dl_latencies) if total_dl_latencies else 0.0
         else:
             round_metrics["avg_comp_latency"] = 0.0
             round_metrics["max_comp_latency"] = 0.0
             round_metrics["avg_energy_consumed"] = 0.0
             round_metrics["total_round_energy"] = 0.0
+            round_metrics["avg_download_latency"] = 0.0
 
         round_history.append(round_metrics)
         with open("global_metrics.txt", "a") as f:
@@ -510,6 +513,7 @@ class FederatedServer:
                 
                 measured_energy_str = await ws.receive_text()
                 measured_energy = float(measured_energy_str)
+                client_download_latency = float(await ws.receive_text())
                 
                 # Update dynamic metrics DB
                 self.client_samples_db[client_id] = samples
@@ -523,7 +527,7 @@ class FederatedServer:
                 done_msg = await ws.receive_text()
                 if done_msg == "done":
                     log_upload(client_id, file_path, samples)
-                    return (file_path, samples, loss, client_id, comp_latency, measured_energy)
+                    return (file_path, samples, loss, client_id, comp_latency, measured_energy, client_download_latency)
         except Exception as e:
             print(f"Error receiving from {client_id}: {e}")
         return None
