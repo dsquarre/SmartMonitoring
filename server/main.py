@@ -268,7 +268,7 @@ class FederatedServer:
         self.client_samples_db = {}
         self.client_losses_db = {}
         
-        self.selector = selector or RLClientSelector(self.agent, self.env)
+        self.selector = selector or RandomClientSelector() or RLClientSelector(self.agent, self.env)
         self.aggregator = aggregator or FedAvg() or FedFV(num_clients=K, alpha=0.1, tau=1)
 
     async def connect(self, client_id, websocket: WebSocket):
@@ -287,7 +287,7 @@ class FederatedServer:
         while rounds_left > 0:
             print(f"Starting round {current_round + 1}, rounds left: {rounds_left}")
             self.client_uploads = []
-
+    
             client_ids = list(self.clients.keys())
             
             # Pass profiles and dynamic metrics database in context
@@ -302,43 +302,37 @@ class FederatedServer:
             selected_ids = self.selector.select_clients(client_ids, K, context=context)
             selected_set = set(selected_ids)
             print(f"Selected clients for training: {selected_ids}")
-
-            #added
+    
+            # Send "wait" signal to unselected clients in parallel
             unselected_tasks = [
-                self.clients[cid].send_text("wait") 
+                self.clients[cid].send_text("wait")
                 for cid in client_ids if cid not in selected_set
             ]
             if unselected_tasks:
                 await asyncio.gather(*unselected_tasks)
-
-            # Read global model bytes
+    
+            # Load global model once per round
             model_path = f"models/global_model_{current_round}.keras"
             with open(model_path, "rb") as f:
                 model_bytes = f.read()
-
-            command = "train_fv" if self.aggregator.mode == "gradients" else "train"
-            client_start_times = {}
-
-            # Send command and model bytes sequentially to selected clients and set start time
-            for client_id in selected_ids:
-                ws = self.clients[client_id]
-                await ws.send_text(command)
-                client_start_times[client_id] = time.time()  # Start timer right before model transmission
-                await ws.send_bytes(model_bytes)
-
-            # Track response roundtrip times for selected clients
+    
             roundtrips = {}
-
+    
             if self.aggregator.mode == "gradients":
-                # Receive pure un-Adamized gradient payloads
-                recv_tasks = [self.receive_raw_gradients(cid, self.clients[cid], client_start_times[cid]) for cid in selected_ids]
-                results = await asyncio.gather(*recv_tasks)
-                for res in results:
-                    if res:
-                        cid = res[3]
-                        roundtrips[cid] = res[5]
+                # Sequentially dispatch and collect gradient payloads per selected client
+                for cid in selected_ids:
+                    ws = self.clients[cid]
                     
-                self.client_uploads = [r for r in results if r is not None]
+                    # Start timing immediately before dispatching to THIS client
+                    start_time = time.time()
+                    await ws.send_text("train_fv")
+                    await ws.send_bytes(model_bytes)
+    
+                    # Receive raw gradients from this client before moving to the next
+                    res = await self.receive_raw_gradients(cid, ws, start_time)
+                    if res:
+                        self.client_uploads.append(res)
+                        roundtrips[cid] = res[5]
                 
                 current_round += 1
                 next_global_model_path = f"models/global_model_{current_round}.keras"
@@ -353,15 +347,14 @@ class FederatedServer:
                 global_model = Model()
                 global_model.model.load_weights(next_global_model_path)
                 
-                # FIX: Iterate and update trainable_variables directly instead of get_weights()
+                # Iterate and update trainable_variables directly
                 for var, gg in zip(global_model.model.trainable_variables, global_gt):
-                    # Perform element-wise subtraction directly on the tensor's underlying numpy array
                     var.assign(var.read_value() - gg)
                 
                 # Save the properly modified model file
                 global_model.model.save(next_global_model_path)
-
-                # Broadcast final updates back to clients to finish their loop sequence
+    
+                # Broadcast final updates back to selected clients
                 serialized_global_grad = json.dumps([g.tolist() for g in global_gt])
                 broadcast_tasks = [self.clients[cid].send_text(serialized_global_grad) for cid in selected_ids]
                 await asyncio.gather(*broadcast_tasks)
@@ -370,18 +363,25 @@ class FederatedServer:
                 rounds_left -= 1
                 uploads_snapshot = list(self.client_uploads)
                 self.client_uploads.clear()
-
+    
             else:
-                # Fall back to standard serialized weight transfers (.keras files)                
-                recv_tasks = [self.receive_model(cid, self.clients[cid], client_start_times[cid]) for cid in selected_ids]
-                results = await asyncio.gather(*recv_tasks)
-                for res in results:
+                # Sequentially dispatch and collect standard model updates (.keras) per selected client
+                for cid in selected_ids:
+                    ws = self.clients[cid]
+    
+                    # Start timing immediately before dispatching to THIS client
+                    start_time = time.time()
+                    await ws.send_text("train")
+                    await ws.send_bytes(model_bytes)
+    
+                    # Receive model payload from this client before moving to the next
+                    res = await self.receive_model(cid, ws, start_time)
                     if res:
-                        cid = res[3]
-                        roundtrips[cid] = res[5]
                         self.client_uploads.append(res)
+                        roundtrips[cid] = res[5]
+    
                 uploads_snapshot = list(self.client_uploads)
-
+    
                 # Delegate directly to your original aggregation function layout
                 self.agg()
 
