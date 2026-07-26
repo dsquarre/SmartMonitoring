@@ -74,21 +74,18 @@ def evaluate(current_round_uploads):
         round_metrics["round"] = current_round
 
         if current_round_uploads:
-            total_latencies = [upload[4] for upload in current_round_uploads if upload]
-            total_energies = [upload[5] for upload in current_round_uploads if upload]
-            total_dl_latencies = [upload[6] for upload in current_round_uploads if upload and len(upload) > 6]
+            total_latencies = [upload[5] for upload in current_round_uploads if upload]
+            total_energies = [upload[4] for upload in current_round_uploads if upload]
             
             round_metrics["avg_comp_latency"] = np.mean(total_latencies)
             round_metrics["max_comp_latency"] = np.max(total_latencies)
             round_metrics["avg_energy_consumed"] = np.mean(total_energies)
             round_metrics["total_round_energy"] = np.sum(total_energies)
-            round_metrics["avg_download_latency"] = np.mean(total_dl_latencies) if total_dl_latencies else 0.0
         else:
             round_metrics["avg_comp_latency"] = 0.0
             round_metrics["max_comp_latency"] = 0.0
             round_metrics["avg_energy_consumed"] = 0.0
             round_metrics["total_round_energy"] = 0.0
-            round_metrics["avg_download_latency"] = 0.0
 
         round_history.append(round_metrics)
         with open("global_metrics.txt", "a") as f:
@@ -170,22 +167,20 @@ def plot_metrics():
     print("Metric plots saved.")
 
     fig, ax1 = plt.subplots(figsize=(8, 5))
-
     color = 'tab:red'
     ax1.set_xlabel('Federated Round')
-    ax1.set_ylabel('Avg Latency (seconds)', color=color)
-    ax1.plot(rounds, [x.get("avg_comp_latency", 0) for x in round_history], marker='o', color=color, label='Latency')
+    ax1.set_ylabel('Avg Latency (s)', color=color)
+    ax1.plot(rounds, [x.get("avg_comp_latency", 0) for x in round_history], marker='o', color=color)
     ax1.tick_params(axis='y', labelcolor=color)
 
-    ax2 = ax1.twinx()  # Instantiate a second axes that shares the same x-axis
+    ax2 = ax1.twinx()
     color = 'tab:green'
-    ax2.set_ylabel('Total Round Energy (Joules)', color=color)
-    ax2.plot(rounds, [x.get("total_round_energy", 0) for x in round_history], marker='s', color=color, label='Energy')
+    ax2.set_ylabel('Total Round Energy (J)', color=color)
+    ax2.plot(rounds, [x.get("total_round_energy", 0) for x in round_history], marker='s', color=color)
     ax2.tick_params(axis='y', labelcolor=color)
 
     plt.title("System Resource Profile vs Federated Round")
     fig.tight_layout()
-    plt.grid(True, linestyle=':')
     plt.savefig("system_resources_vs_round.png")
     plt.close()
 
@@ -309,37 +304,39 @@ class FederatedServer:
             print(f"Selected clients for training: {selected_ids}")
 
             #added
-            command = "train_fv" if self.aggregator.mode == "gradients" else "train"
+            unselected_tasks = [
+                self.clients[cid].send_text("wait") 
+                for cid in client_ids if cid not in selected_set
+            ]
+            if unselected_tasks:
+                await asyncio.gather(*unselected_tasks)
 
-            send_tasks = []
-            for client_id, ws in self.clients.items():
-                if client_id in selected_set:
-                    send_tasks.append(ws.send_text(command))
-                else:
-                    send_tasks.append(ws.send_text("wait"))
-            await asyncio.gather(*send_tasks)
-
+            # Read global model bytes
             model_path = f"models/global_model_{current_round}.keras"
             with open(model_path, "rb") as f:
                 model_bytes = f.read()
 
-            send_model_tasks = []
+            command = "train_fv" if self.aggregator.mode == "gradients" else "train"
+            client_start_times = {}
+
+            # Send command and model bytes sequentially to selected clients and set start time
             for client_id in selected_ids:
                 ws = self.clients[client_id]
-                send_model_tasks.append(ws.send_bytes(model_bytes))
-            await asyncio.gather(*send_model_tasks)
+                await ws.send_text(command)
+                client_start_times[client_id] = time.time()  # Start timer right before model transmission
+                await ws.send_bytes(model_bytes)
 
             # Track response roundtrip times for selected clients
             roundtrips = {}
 
             if self.aggregator.mode == "gradients":
                 # Receive pure un-Adamized gradient payloads
-                start_time = time.time()
-                recv_tasks = [self.receive_raw_gradients(cid, self.clients[cid]) for cid in selected_ids]
+                recv_tasks = [self.receive_raw_gradients(cid, self.clients[cid], client_start_times[cid]) for cid in selected_ids]
                 results = await asyncio.gather(*recv_tasks)
-                elapsed = time.time() - start_time
-                for cid in selected_ids:
-                    roundtrips[cid] = elapsed
+                for res in results:
+                    if res:
+                        cid = res[3]
+                        roundtrips[cid] = res[5]
                     
                 self.client_uploads = [r for r in results if r is not None]
                 
@@ -375,20 +372,13 @@ class FederatedServer:
                 self.client_uploads.clear()
 
             else:
-                # Fall back to standard serialized weight transfers (.keras files)
-                start_time = time.time()
-                recv_tasks = []
-                for client_id in selected_ids:
-                    ws = self.clients[client_id]
-                    recv_tasks.append(self.receive_model(client_id, ws))
-
+                # Fall back to standard serialized weight transfers (.keras files)                
+                recv_tasks = [self.receive_model(cid, self.clients[cid], client_start_times[cid]) for cid in selected_ids]
                 results = await asyncio.gather(*recv_tasks)
-                elapsed = time.time() - start_time
-                for cid in selected_ids:
-                    roundtrips[cid] = elapsed
-                    
                 for res in results:
                     if res:
+                        cid = res[3]
+                        roundtrips[cid] = res[5]
                         self.client_uploads.append(res)
                 uploads_snapshot = list(self.client_uploads)
 
@@ -479,7 +469,7 @@ class FederatedServer:
         await asyncio.gather(*exit_tasks)
         self.is_running = False
 
-    async def receive_raw_gradients(self, client_id, ws: WebSocket):
+    async def receive_raw_gradients(self, client_id, ws: WebSocket, start_time: float):
         global client_id_map
         try:
             json_data = await ws.receive_text()
@@ -490,13 +480,15 @@ class FederatedServer:
             # Update dynamic metrics DB
             self.client_samples_db[client_id] = float(data["samples"])
             self.client_losses_db[client_id] = float(data["loss"])
+            measured_energy = float(data.get("measured_energy", 0.0))
             
-            return (client_grads, float(data["samples"]), float(data["loss"]), client_id_map[client_id], comp_latency, measured_energy)
+            total_latency = time.time() - start_time
+            return (client_grads, float(data["samples"]), float(data["loss"]), client_id_map[client_id], measured_energy, total_latency)
         except Exception as e:
             print(f"Error reading raw gradients from {client_id}: {e}")
             return None
 
-    async def receive_model(self, client_id, ws: WebSocket):
+    async def receive_model(self, client_id, ws: WebSocket, start_time: float):
         global current_round
         try:
             msg = await ws.receive_text()
@@ -507,13 +499,8 @@ class FederatedServer:
                 #added
                 loss_str = await ws.receive_text()
                 loss = float(loss_str)
-
-                comp_latency_str = await ws.receive_text()
-                comp_latency = float(comp_latency_str)
-                
                 measured_energy_str = await ws.receive_text()
                 measured_energy = float(measured_energy_str)
-                client_download_latency = float(await ws.receive_text())
                 
                 # Update dynamic metrics DB
                 self.client_samples_db[client_id] = samples
@@ -527,7 +514,8 @@ class FederatedServer:
                 done_msg = await ws.receive_text()
                 if done_msg == "done":
                     log_upload(client_id, file_path, samples)
-                    return (file_path, samples, loss, client_id, comp_latency, measured_energy, client_download_latency)
+                    total_latency = time.time() - start_time
+                    return (file_path, samples, loss, client_id, measured_energy, total_latency)
         except Exception as e:
             print(f"Error receiving from {client_id}: {e}")
         return None

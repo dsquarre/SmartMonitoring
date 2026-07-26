@@ -200,8 +200,6 @@ def download_model(save_path):
         print(f"Error downloading model: {e}")
         return False
 
-
-
 async def simulate(client):
     try:
         async with websockets.connect(ws_url+client.client_id, max_size=None) as ws:
@@ -211,11 +209,9 @@ async def simulate(client):
                 if msg == "train":
                     print(f"[{client.client_id}] selected for training")
 
-                    download_start = time.perf_counter()
                     model_bytes = await ws.recv()
                     if isinstance(model_bytes, str):
                         model_bytes = model_bytes.encode('utf-8')
-                    download_latency = time.perf_counter() - download_start
                     model_path = f"models/global_model_{client.client_id}.keras"
                     with open(model_path, "wb") as f:
                         f.write(model_bytes)
@@ -230,11 +226,9 @@ async def simulate(client):
 
                         # Start tracking inside a background executor thread
                         await asyncio.to_thread(start_carbon_tracker, tracker)
-                        start_time = time.perf_counter()
 
                         await asyncio.to_thread(client.model.train, 1)
 
-                        comp_latency = time.perf_counter() - start_time
                         # Stop tracking and fetch calculated energy values
                         await asyncio.to_thread(stop_carbon_tracker, tracker)
                         
@@ -243,24 +237,18 @@ async def simulate(client):
 
                         client_model_path = f"models/client{client.client_id}_model.keras"
                         client.model.model.save(client_model_path)
-                        upload_start = time.perf_counter()
                         await ws.send("FILE")
                         await ws.send(str(client.samples))
                         await ws.send(str(train_loss))
-
-                        await ws.send(str(comp_latency))
                         await ws.send(str(actual_energy_joules))
-                        await ws.send(str(download_latency))
                         
                         with open(client_model_path, "rb") as f:
                             await ws.send(f.read())
                         await ws.send("done")
-                        upload_latency = time.perf_counter() - upload_start
-                        print(f"Download: {download_latency:.4f}s | Upload: {upload_latency:.4f}s")
                     client.current_round += 1
 
                 elif msg == "train_fv":
-                    # --- ROUTINE B: PURE GRADIENT CONFLICT STRATEGIES (FedFV) ---
+                    # FedFV
                     print(f"[{client.client_id}] Gradient FedFV execution")
                     model_bytes = await ws.recv()
                     if isinstance(model_bytes, str): model_bytes = model_bytes.encode('utf-8')
@@ -272,11 +260,9 @@ async def simulate(client):
                         # Initialize tracking configurations cleanly
                         tracker = EmissionsTracker(project_name=f"client_{client.client_id}_round", save_to_file=False, log_level="error")
                         await asyncio.to_thread(start_carbon_tracker, tracker)
-                        start_time = time.perf_counter()
                         # Extract un-Adamized raw structural updates using custom local loops
                         local_grads, current_loss = await asyncio.to_thread(client.model.train_local_gradients_fv)
 
-                        comp_latency = time.perf_counter() - start_time
                         await asyncio.to_thread(stop_carbon_tracker, tracker)
                         actual_energy_joules = tracker._total_energy.kWh * 3.6e6 if tracker._total_energy else 0.0
                         
@@ -284,7 +270,6 @@ async def simulate(client):
                         "gradients": [g.tolist() for g in local_grads],
                         "loss": current_loss,
                         "samples": client.samples,
-                        "comp_latency": comp_latency,
                         "measured_energy": actual_energy_joules
                     }
                     await ws.send(json.dumps(payload))
