@@ -35,42 +35,53 @@ ssh-keygen -t rsa -b 2048
 - After 5 min, ssh into server and replace the ps.dat with actual hashed password you want to use, and ssh into clients to start the federated learning system
 
 
-## TODOs
-- Error and edge cases handling
-- check convergence
+## How to Add and Configure a New Client
+
+To add a new client (e.g. `client_11`) to the Federated Learning system:
+
+### 1. Register Credentials on the Server
+Generate the SHA256 hash of the client's desired password:
+```bash
+python -c "import hashlib; print(hashlib.sha256(b'YOUR_PASSWORD').hexdigest())"
+```
+Add the client ID and hash to [server/credentials.json](file:///home/danish/SmartMonitoring/server/credentials.json):
+```json
+{
+  "client_0": "8b841ea...",
+  "client_11": "your_generated_sha256_hash_here"
+}
+```
+
+### 2. Start the Client Node
+Start the client with the matching client ID and password:
+```bash
+python client/main.py -d /path/to/dataset.npz -s <server_ip_or_url> -p <password> -c client_11
+```
+
+---
 
 ## How to Use
 
 ### Client
-- Model definition is as defined in model.py and can be changed keeping the essence of funtions same.
-- Upload the dataset in A/ or B/ or C/. In our example we have preprocessed numpy arrays stored in A/A0.npz B/B0.npz etc
-- Set the configs like server url and password and epochs per round and run main.py
+* **Parameters**:
+  - `-d, --dataset`: (Required) Path to the `.npz` local dataset.
+  - `-s, --server-ip`: Server IP or URL (e.g. `127.0.0.1:8000` or `https://my-fl-server.com`).
+  - `-p, --password`: Password configured for the client ID.
+  - `-c, --client-id`: The unique client ID registered in `credentials.json` (Defaults to `client_0`).
+  - `--no-verify` / `--insecure`: Bypass SSL certificate checks (useful for testing self-signed SSL/TLS setups).
 
 ```bash
-#change password and url as required
-mkdir A B C
-#copy all the datasets for example C0.npz, C1.npz till no of clients
-pip install -r requirements.txt
-#python3 main.py -d C/C > client_log.txt
-#or
-chmod +x run.sh
-./run.sh
+# Example running locally
+pip install -r client/requirements.txt
+python client/main.py -d data/C0.npz -s localhost:8000 -p P7h1!quiBO0no96 -c client_0
 ```
 
 ### Server
-- Model definition must be same as client.
-- set the configs like rounds_left (i.e. no of rounds)
-- store hashed password in ps.dat
-- run main.py through fastapi
-
+* Ensure your hashed client credentials are set in [server/credentials.json](file:///home/danish/SmartMonitoring/server/credentials.json).
+* Run the server using uvicorn:
 
 ```bash
-pip install -r requirements.txt
-fastapi run main.py > server_log.txt
+pip install -r server/requirements.txt
+python -m uvicorn main:app --host 0.0.0.0 --port 8000
 ```
-or 
-```bash
-nohup python -m uvicorn main:app --host 0.0.0.0 --port 8000 > server_log.txt 2>&1 &
-#to kill
-#sudo fuser -k 8000/tcp
-```
+

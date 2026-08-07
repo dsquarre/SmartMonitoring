@@ -8,23 +8,21 @@ class FederatedEnv:
         self.kappa = kappa
         self.cycles_per_sample = cycles_per_sample
 
-    def compute_client_cost(self, numeric_id, samples, measured_roundtrip=None):
+    def compute_client_cost(self, numeric_id, samples, actual_comp_latency, actual_measured_energy, measured_roundtrip=None):
         profile = self.profiles[numeric_id]
-        f = profile["cpu_frequency"]
-        P_tx = profile["tx_power"]
+        P_tx = profile.get("tx_power", 0.2)
         
-        # 1. Local Training Latency and Energy (BEFL Model)
-        epochs = 1
-        t_train = (epochs * self.cycles_per_sample * samples) / f
-        E_train = self.kappa * epochs * self.cycles_per_sample * samples * (f ** 2)
+        # 1. Local Training Latency and Energy (reported by client using CodeCarbon/perf_counter)
+        t_train = actual_comp_latency
+        E_train = actual_measured_energy
 
-        # 2. Transmission Latency and Energy (BEFL Model)
+        # 2. Transmission Latency and Energy
         if measured_roundtrip is not None:
-            # Derive transmission latency from actual WebSocket roundtrip time
+            # Derive transmission latency from actual WebSocket roundtrip time minus local training latency
             t_trans = max(0.001, measured_roundtrip - t_train)
         else:
             # Fallback to simulated channel upload rate
-            t_trans = self.model_size_bits / profile["r_trans"]
+            t_trans = self.model_size_bits / profile.get("r_trans", 15e6)
             
         E_trans = P_tx * t_trans
 

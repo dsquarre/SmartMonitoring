@@ -12,8 +12,6 @@ import json
 import platform
 import subprocess
 import websockets
-import hashlib
-import ssl
 from codecarbon import EmissionsTracker
 
 # Argument parsing and environment variable configuration
@@ -21,8 +19,6 @@ parser = argparse.ArgumentParser(description="Federated Learning Client Containe
 parser.add_argument("-d", "--dataset", type=str, required=True, help="Path to the dataset .npz file")
 parser.add_argument("-s", "--server-ip", type=str, default=os.environ.get("SERVER_IP"), help="IP address of the server")
 parser.add_argument("-p", "--password", type=str, default=os.environ.get("PASSWORD"), help="Authentication password")
-parser.add_argument("-c", "--client-id", type=str, default=os.environ.get("CLIENT_ID", "client_0"), help="Unique Client Identifier")
-parser.add_argument("--no-verify", "--insecure", action="store_true", default=os.environ.get("NO_VERIFY", "").lower() in ("true", "1", "yes"), help="Bypass SSL certificate verification")
 args = parser.parse_args()
 
 # Resolve Server IP
@@ -32,19 +28,10 @@ if not ip:
         with open("ip.txt", "r") as f:
             ip = f.read().strip()
     else:
-        ip = "localhost:8000"
+        ip = "localhost"
 
-# Resolve Server URL and WebSocket URL scheme dynamically
-if "://" in ip:
-    server_url = ip
-    host = ip.split("://")[1]
-    if ip.startswith("https://"):
-        ws_url = f"wss://{host}/ws/"
-    else:
-        ws_url = f"ws://{host}/ws/"
-else:
-    server_url = f"http://{ip}"
-    ws_url = f"ws://{ip}/ws/"
+server_url = f"http://{ip}"
+ws_url = f"ws://{ip}/ws/"
 
 os.makedirs('models', exist_ok=True)
 os.makedirs('metrics', exist_ok=True)
@@ -83,10 +70,9 @@ def detect_device_specs():
 
 
 class Client:
-    def __init__(self, filepath, client_id, password=None, no_verify=False):
-        self.client_id = client_id
+    def __init__(self, filepath, password=None):
+        self.client_id = None
         self.password = password
-        self.no_verify = no_verify
         self.authenticate()
         self.current_round = -1
         self.model = Model(filepath)
@@ -105,47 +91,23 @@ class Client:
                 print("Error: Authentication password must be provided via -p/--password, PASSWORD env, or psswd.txt file.")
                 sys.exit(1)
 
+        url = f"{server_url}/"
         try:
-            # Step 1: Initiate Auth & Get Challenge
-            initiate_url = f"{server_url}/initiate"
-            payload = {"client_id": self.client_id}
-            
-            # Configure SSL verify options
-            verify_ssl = not self.no_verify
-            if not verify_ssl:
-                import urllib3
-                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-                
-            response = requests.post(initiate_url, json=payload, verify=verify_ssl)
-            if response.status_code != 200:
-                print(f"Failed to initiate authentication: {response.status_code} - {response.text}")
-                sys.exit(1)
-                
-            challenge = response.json().get("challenge")
-            if not challenge:
-                print("Authentication failed: No challenge received from server.")
-                sys.exit(1)
-                
-            # Step 2: Compute Cryptographic Response
-            # HashedPassword = SHA256(password)
-            hashed_pwd = hashlib.sha256(psswd.encode('utf-8')).hexdigest()
-            # Response = SHA256(HashedPassword + challenge)
-            response_hash = hashlib.sha256((hashed_pwd + challenge).encode('utf-8')).hexdigest()
-            
-            # Step 3: Submit Response and specs
-            authenticate_url = f"{server_url}/authenticate"
             specs = detect_device_specs()
-            auth_payload = {
-                "client_id": self.client_id,
-                "response": response_hash,
+            payload = {
+                "password": psswd,
                 "specs": specs
             }
-            
-            auth_response = requests.post(authenticate_url, json=auth_payload, verify=verify_ssl)
-            if auth_response.status_code == 200:
+            response = requests.post(url, json=payload)
+            if response.status_code == 200:
+                auth_info = response.json()
+                self.client_id = auth_info.get("your_id", None)
+                if self.client_id is None:
+                    print("Authentication failed: No client ID received.")
+                    sys.exit(1)
                 print(f"Authenticated successfully. Client ID: {self.client_id}")
             else:
-                print(f"Failed to authenticate: {auth_response.status_code} - {auth_response.text}")
+                print(f"Failed to authenticate: {response.status_code}")
                 sys.exit(1)
         except Exception as e:
             print(f"Error during authentication: {e}")
@@ -206,14 +168,7 @@ class Client:
 
 async def simulate(client):
     try:
-        # Configure SSL context for websockets if secure protocol is active and verify is bypassed
-        ssl_context = None
-        if ws_url.startswith("wss://") and client.no_verify:
-            ssl_context = ssl.create_default_context()
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
-            
-        async with websockets.connect(ws_url + client.client_id, ssl=ssl_context, max_size=None) as ws:
+        async with websockets.connect(ws_url + client.client_id, max_size=None) as ws:
             await ws.send("ready")
             while True:
                 msg = await ws.recv()
@@ -342,7 +297,7 @@ async def simulate(client):
 
 
 async def main():
-    client = Client(args.dataset, args.client_id, args.password, args.no_verify)
+    client = Client(args.dataset, args.password)
     await simulate(client)
 
 if __name__ == "__main__":

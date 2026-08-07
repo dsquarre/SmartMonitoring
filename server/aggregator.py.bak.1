@@ -5,61 +5,6 @@ from model import Model
 import copy
 import math
 
-def filter_poisoned_clients(client_data: List, global_model_path: str, mode: str = "weights", threshold_multiplier: float = 3.0) -> List:
-    """
-    Filters out extreme outlier/poisoned client updates dynamically using Median Absolute Deviation (MAD).
-    Allows genuine variance by targeting Z-scores higher than threshold_multiplier.
-    """
-    if len(client_data) <= 2:
-        return client_data # Need at least 3 clients for reliable median/MAD statistics
-        
-    norms = []
-    
-    if mode == "weights":
-        global_model = Model()
-        global_model.model.load_weights(global_model_path)
-        global_weights = global_model.model.get_weights()
-        
-        for item in client_data:
-            model_path = item[0]
-            local_model = Model()
-            local_model.model.load_weights(model_path)
-            local_weights = local_model.model.get_weights()
-            
-            diffs = [lw - gw for lw, gw in zip(local_weights, global_weights)]
-            flat_diff = np.concatenate([d.flatten() for d in diffs])
-            norms.append(float(np.linalg.norm(flat_diff)))
-            
-    elif mode == "gradients":
-        for item in client_data:
-            client_grads = item[0]
-            flat_grad = np.concatenate([g.flatten() for g in client_grads])
-            norms.append(float(np.linalg.norm(flat_grad)))
-            
-    norms = np.array(norms)
-    median_norm = np.median(norms)
-    mad = np.median(np.abs(norms - median_norm))
-    
-    if mad < 1e-8:
-        mad = 1e-8
-        
-    filtered_data = []
-    for idx, item in enumerate(client_data):
-        norm = norms[idx]
-        z_score = (norm - median_norm) / mad
-        client_id = item[3]
-        
-        if z_score > threshold_multiplier:
-            print(f"[POISONING FILTER] Discarded update from client {client_id}: norm={norm:.6f}, median={median_norm:.6f}, Z-score={z_score:.2f}")
-        else:
-            filtered_data.append(item)
-            
-    if len(filtered_data) == 0:
-        print("[POISONING FILTER] Warning: All client updates were filtered out. Falling back to using all updates.")
-        return client_data
-        
-    return filtered_data
-
 class ModelAggregator(ABC):
     @property
     @abstractmethod
@@ -88,7 +33,6 @@ class FedAvg(ModelAggregator):
         
     def aggregate(self, client_data, global_model_path, current_round):
         print("Using FedAvg")
-        client_data = filter_poisoned_clients(client_data, global_model_path, mode="weights")
         global_model = Model()
         total_samples = sum(samples for _, samples, *_, _ in client_data)
 
@@ -116,7 +60,6 @@ class qFedAvg(ModelAggregator):
         return "weights"
 
     def aggregate(self, client_data, global_model_path, current_round):
-        client_data = filter_poisoned_clients(client_data, global_model_path, mode="weights")
         global_model = Model()
         raw_weights = []
 
@@ -169,7 +112,6 @@ class FedFV(ModelAggregator):
         """
         Executes internal/external conflict resolution routines directly on raw gradient lists.
         """
-        client_data = filter_poisoned_clients(client_data, global_model_path, mode="gradients")
         gradients = []
         losses = []
         client_ids = []
@@ -284,7 +226,6 @@ class FedAdam(ModelAggregator):
             global_model.model.save( global_model_path)
             return
 
-        client_data = filter_poisoned_clients(client_data, self.previous_global_model, mode="weights")
         global_model = Model()
         print("Using FedAdam")
 

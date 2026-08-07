@@ -4,7 +4,6 @@ import json
 import asyncio
 from datetime import datetime
 from fastapi import FastAPI, Body, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
 import tensorflow as tf
 from model import Model
 from collections import deque
@@ -16,8 +15,6 @@ import time
 from selector import RandomClientSelector, RLClientSelector, RandomRLAgent, QLearningAgent
 from aggregator import FedAvg, FedFV, qFedAvg, FedAdam
 from rl_env import FederatedEnv
-import hashlib
-import hmac
 
 
 client_id_map = {}
@@ -217,76 +214,41 @@ client_metrics format:
     )
 ]
 """
-def load_credentials():
-    credentials_path = os.path.join(os.path.dirname(__file__), "credentials.json")
-    if os.path.exists(credentials_path):
-        with open(credentials_path, "r") as f:
-            return json.load(f)
-    return {}
+def authenticate(password):
+    with open("ps.dat", "rb") as f:
+        stored_hash = f.read()
+    if bcrypt.checkpw(password.encode('utf-8'), stored_hash):
+            return True
+    else:
+        return False
 
-@app.post("/initiate")
-async def initiate_auth(payload: dict = Body(...)):
-    client_id = payload.get("client_id")
-    if not client_id:
-        return JSONResponse(status_code=400, content={"error": "Missing client_id"})
-    
-    credentials = load_credentials()
-    if client_id not in credentials:
-        return JSONResponse(status_code=401, content={"error": "Unauthorized client ID"})
-    
-    # Generate a cryptographically secure challenge
-    challenge = os.urandom(32).hex()
-    manager.challenges[client_id] = challenge
-    
-    return {"challenge": challenge}
-
-@app.post("/authenticate")
-async def authenticate_client(payload: dict = Body(...)):
+@app.post("/")
+async def root(payload: dict = Body(...)):
     global next_numeric_id, client_id_map, clients
-    client_id = payload.get("client_id")
-    response = payload.get("response")
+    psswd = payload.get("password")
     specs = payload.get("specs", {})
     
-    if not client_id or not response:
-        return JSONResponse(status_code=400, content={"error": "Missing client_id or response"})
+    if not psswd or not authenticate(psswd):
+        print('invalid password attempt')
+        return {"message": "Welcome to the Federated Learning Server."}
+        
+    id = generate_id()
+    clients.add(id)
     
-    challenge = manager.challenges.get(client_id)
-    if not challenge:
-        return JSONResponse(status_code=400, content={"error": "No active challenge for this client"})
-    
-    credentials = load_credentials()
-    stored_hash = credentials.get(client_id)
-    if not stored_hash:
-        return JSONResponse(status_code=401, content={"error": "Unauthorized client ID"})
-    
-    # Compute expected response: SHA256(stored_hash + challenge)
-    expected = hashlib.sha256((stored_hash + challenge).encode('utf-8')).hexdigest()
-    
-    # Constant-time comparison
-    if not hmac.compare_digest(response, expected):
-        print(f"Invalid authentication response from client: {client_id}")
-        return JSONResponse(status_code=401, content={"error": "Authentication failed"})
-    
-    # Clean up used challenge
-    del manager.challenges[client_id]
-    
-    # Authorize the client
-    manager.authenticated_clients.add(client_id)
-    clients.add(client_id)
-    
-    if client_id not in client_id_map:
+    if id not in client_id_map:
         num_id = next_numeric_id
-        client_id_map[client_id] = num_id
+        client_id_map[id] = num_id
         next_numeric_id += 1
         
+        # Save client specs to profile database dynamically!
         manager.env.profiles[num_id] = {
             "cpu_frequency": float(specs.get("cpu_frequency", 2.0e9)),
             "tx_power": float(specs.get("tx_power", 0.2)),
-            "r_trans": 15e6
+            "r_trans": 15e6  # Default baseline upload bandwidth: 15 Mbps
         }
     
-    print(f"Client {client_id} successfully authenticated and registered with specs: {specs}. Connected: {len(clients)}")
-    return {"status": "authenticated", "your_id": client_id}
+    print(f"Client {id} registered with specs: {specs}. Connected: {len(clients)}")
+    return {"your_id": id}
 
 
 class FederatedServer:
@@ -310,10 +272,6 @@ class FederatedServer:
         # DB to track latest client metrics persistently
         self.client_samples_db = {}
         self.client_losses_db = {}
-        self.client_latency_db = {}
-        self.client_energy_db = {}
-        self.challenges = {}
-        self.authenticated_clients = set()
         
         self.selector = selector or RLClientSelector(self.agent, self.env)
         self.aggregator = aggregator or FedAvg() or FedFV(num_clients=K, alpha=0.1, tau=1)
@@ -471,11 +429,7 @@ class FederatedServer:
                 num_id = client_id_map.get(cid, 0)
                 samples = self.client_samples_db.get(cid, 1000)
                 measured_rt = roundtrips.get(cid, None)
-                actual_comp_lat = self.client_latency_db.get(cid, 1.0)
-                actual_meas_energy = self.client_energy_db.get(cid, 5.0)
-                selected_metrics[num_id] = self.env.compute_client_cost(
-                    num_id, samples, actual_comp_lat, actual_meas_energy, measured_rt
-                )
+                selected_metrics[num_id] = self.env.compute_client_cost(num_id, samples, measured_rt)
                 
             local_losses = [self.client_losses_db.get(cid, 1.0) for cid in selected_ids]
             reward = self.env.calculate_reward(selected_metrics, global_loss_delta, local_losses)
@@ -533,14 +487,9 @@ class FederatedServer:
             client_grads = [np.array(g) for g in data["gradients"]]
             print(f"[SERVER] Successfully received raw gradients from client {client_id}")
             
-            comp_latency = float(data["comp_latency"])
-            measured_energy = float(data["measured_energy"])
-            
             # Update dynamic metrics DB
             self.client_samples_db[client_id] = float(data["samples"])
             self.client_losses_db[client_id] = float(data["loss"])
-            self.client_latency_db[client_id] = comp_latency
-            self.client_energy_db[client_id] = measured_energy
             
             return (client_grads, float(data["samples"]), float(data["loss"]), client_id_map[client_id], comp_latency, measured_energy)
         except Exception as e:
@@ -569,8 +518,6 @@ class FederatedServer:
                 # Update dynamic metrics DB
                 self.client_samples_db[client_id] = samples
                 self.client_losses_db[client_id] = loss
-                self.client_latency_db[client_id] = comp_latency
-                self.client_energy_db[client_id] = measured_energy
                 
                 file_bytes = await ws.receive_bytes()
                 file_path = f"models/client_{client_id}_model_{current_round + 1}.keras"
@@ -622,7 +569,7 @@ manager = FederatedServer()
 @app.websocket("/ws/{client_id}")
 async def websocket_endpoint(websocket: WebSocket, client_id: str):
     global clients,manager,N
-    if client_id not in clients or client_id not in manager.authenticated_clients:
+    if client_id not in clients:
         await websocket.close(code=1008)
         return
     await websocket.accept()
