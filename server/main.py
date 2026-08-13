@@ -36,9 +36,29 @@ K = int(os.environ.get("FL_K", "3"))
 ROUNDS = int(os.environ.get("FL_ROUNDS", "2"))
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 
+# Loop-safe Async Redis Proxy to handle TestClient's loop closures
+class AsyncRedisProxy:
+    def __init__(self, url):
+        self.url = url
+        self.client = None
+        self.loop = None
+
+    def get_client(self):
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+        if self.client is None or self.loop is not current_loop or (self.loop and self.loop.is_closed()):
+            self.client = aioredis.from_url(self.url, protocol=2, decode_responses=True)
+            self.loop = current_loop
+        return self.client
+
+    def __getattr__(self, name):
+        return getattr(self.get_client(), name)
+
 # Redis clients
-redis_sync = redis.from_url(REDIS_URL, decode_responses=True)
-redis_async = aioredis.from_url(REDIS_URL, decode_responses=True)
+redis_sync = redis.from_url(REDIS_URL, protocol=2, decode_responses=True)
+redis_async = AsyncRedisProxy(REDIS_URL)
 
 app = FastAPI()
 
