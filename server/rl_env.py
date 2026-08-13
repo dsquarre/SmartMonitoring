@@ -8,13 +8,14 @@ class FederatedEnv:
         self.kappa = kappa
         self.cycles_per_sample = cycles_per_sample
 
-    def compute_client_cost(self, numeric_id, samples, actual_comp_latency, actual_measured_energy, measured_roundtrip=None):
+    def compute_client_cost(self, numeric_id, samples, actual_comp_latency=None, actual_measured_energy=None, measured_roundtrip=None):
         profile = self.profiles[numeric_id]
         P_tx = profile.get("tx_power", 0.2)
+        f = profile.get("cpu_frequency", 2.0e9)
         
-        # 1. Local Training Latency and Energy (reported by client using CodeCarbon/perf_counter)
-        t_train = actual_comp_latency
-        E_train = actual_measured_energy
+        # 1. Local Training Latency and Energy (default to 0.0 if not available)
+        t_train = actual_comp_latency if actual_comp_latency is not None else 0.0
+        E_train = actual_measured_energy if actual_measured_energy is not None else 0.0
 
         # 2. Transmission Latency and Energy
         if measured_roundtrip is not None:
