@@ -196,12 +196,16 @@ def plot_metrics_local(round_history):
     plt.close()
     print("Metric plots saved locally.")
 
-def load_credentials():
+def get_client_password_hash(client_id: str) -> str:
     credentials_path = os.path.join(os.path.dirname(__file__), "credentials.json")
     if os.path.exists(credentials_path):
-        with open(credentials_path, "r") as f:
-            return json.load(f)
-    return {}
+        try:
+            with open(credentials_path, "r") as f:
+                creds = json.load(f)
+                return creds.get(client_id)
+        except Exception as e:
+            print(f"Warning: Failed to load credentials.json: {e}")
+    return None
 
 @app.post("/initiate")
 async def initiate_auth(payload: dict = Body(...)):
@@ -209,8 +213,8 @@ async def initiate_auth(payload: dict = Body(...)):
     if not client_id:
         return JSONResponse(status_code=400, content={"error": "Missing client_id"})
     
-    credentials = load_credentials()
-    if client_id not in credentials:
+    stored_hash = get_client_password_hash(client_id)
+    if not stored_hash:
         return JSONResponse(status_code=401, content={"error": "Unauthorized client ID"})
     
     challenge = os.urandom(32).hex()
@@ -231,8 +235,7 @@ async def authenticate_client(payload: dict = Body(...)):
     if not challenge:
         return JSONResponse(status_code=400, content={"error": "No active challenge for this client"})
     
-    credentials = load_credentials()
-    stored_hash = credentials.get(client_id)
+    stored_hash = get_client_password_hash(client_id)
     if not stored_hash:
         return JSONResponse(status_code=401, content={"error": "Unauthorized client ID"})
     
