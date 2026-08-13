@@ -18,6 +18,13 @@ class ClientSelector(ABC):
         Returns:
             List of selected client IDs.
         """
+    def update_policy(self, round_summary: Dict[str, Any]):
+        """
+        Optional hook to update selector policy (e.g., for RL/learning-based selectors).
+
+        Args:
+            round_summary: Dictionary containing round metrics, losses, latencies, and costs.
+        """
         pass
 
 class RandomClientSelector(ClientSelector):
@@ -194,3 +201,44 @@ class RLClientSelector(ClientSelector):
                 float(profile["cpu_frequency"])
             ])
         return np.array(state_list, dtype=np.float32)
+
+    def update_policy(self, round_summary: Dict[str, Any]):
+        if self.last_state is None or self.last_action is None:
+            return
+
+        selected_ids = round_summary.get("selected_ids", [])
+        client_id_map = round_summary.get("client_id_map", {})
+        client_samples = round_summary.get("client_samples", {})
+        client_losses = round_summary.get("client_losses", {})
+        global_loss_delta = round_summary.get("global_loss_delta", 0.0)
+        local_losses = round_summary.get("local_losses", [])
+        active_clients = round_summary.get("active_clients", list(client_id_map.keys()))
+        roundtrips = round_summary.get("client_roundtrips", {})
+        latencies = round_summary.get("client_latencies", {})
+        energies = round_summary.get("client_energies", {})
+        
+        selected_metrics = {}
+        for cid in selected_ids:
+            num_id = client_id_map.get(cid, 0)
+            samples = client_samples.get(cid, 1000)
+            indiv_rt = roundtrips.get(cid, round_summary.get("elapsed_round"))
+            comp_lat = latencies.get(cid, 1.0)
+            energy = energies.get(cid, 5.0)
+            selected_metrics[num_id] = self.env.compute_client_cost(
+                num_id, samples, comp_lat, energy, indiv_rt
+            )
+            
+        reward = self.env.calculate_reward(selected_metrics, global_loss_delta, local_losses)
+        print(f"[RL Environment] Round {round_summary.get('round', 1)} Stats:")
+        print(f"  - Delta Global Loss: {global_loss_delta:.4f}")
+        print(f"  - Calculated Reward: {reward:.4f}")
+        
+        next_context = {
+            "round": round_summary.get("round", 1),
+            "rounds_left": round_summary.get("rounds_left", 0),
+            "client_id_map": client_id_map,
+            "client_samples": client_samples,
+            "client_losses": client_losses
+        }
+        next_state = self._build_state(active_clients, next_context)
+        self.agent.update(self.last_state, self.last_action, reward, next_state, context=next_context)

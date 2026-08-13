@@ -558,48 +558,42 @@ class FederatedServer:
                     if os.path.exists(plot_file):
                         upload_file(plot_file, f"plots/{plot_file}")
                         
-            # --- RL Training Step ---
+            # --- Update Client Selector Policy ---
             if round_history:
                 current_loss = round_history[-1]["total_loss"]
                 prev_loss = round_history[-2]["total_loss"] if len(round_history) > 1 else current_loss
                 global_loss_delta = prev_loss - current_loss
                 
-                selected_metrics = {}
-                for cid in selected_ids:
-                    num_id = client_id_map.get(cid, 0)
-                    samples = client_samples.get(cid, 1000)
-                    individual_rt_raw = await redis_async.hget("fl:client_roundtrip", cid)
-                    measured_rt = float(individual_rt_raw) if individual_rt_raw else elapsed_round
-                    actual_comp_lat = float(await redis_async.hget("fl:client_latency", cid) or 1.0)
-                    actual_meas_energy = float(await redis_async.hget("fl:client_energy", cid) or 5.0)
-                    selected_metrics[num_id] = self.env.compute_client_cost(
-                        num_id, samples, actual_comp_lat, actual_meas_energy, measured_rt
-                    )
-                    
-                local_losses = [client_losses.get(cid, 1.0) for cid in selected_ids]
-                reward = self.env.calculate_reward(selected_metrics, global_loss_delta, local_losses)
-                print(f"[RL Environment] Round {current_round} Stats:")
-                print(f"  - Delta Global Loss: {global_loss_delta:.4f}")
-                print(f"  - Calculated Reward: {reward:.4f}")
-                
-                if isinstance(self.selector, RLClientSelector):
-                    next_context = {
-                        "round": current_round,
-                        "rounds_left": rounds_left,
-                        "env": self.env,
-                        "client_id_map": client_id_map,
-                        "client_samples": client_samples,
-                        "client_losses": client_losses
+                round_summary = {
+                    "round": current_round,
+                    "rounds_left": rounds_left,
+                    "selected_ids": selected_ids,
+                    "active_clients": active_clients,
+                    "client_id_map": client_id_map,
+                    "client_samples": client_samples,
+                    "client_losses": client_losses,
+                    "global_loss_delta": global_loss_delta,
+                    "local_losses": [client_losses.get(cid, 1.0) for cid in selected_ids],
+                    "elapsed_round": elapsed_round,
+                    "client_roundtrips": {
+                        cid: float(await redis_async.hget("fl:client_roundtrip", cid) or elapsed_round)
+                        for cid in selected_ids
+                    },
+                    "client_latencies": {
+                        cid: float(await redis_async.hget("fl:client_latency", cid) or 1.0)
+                        for cid in selected_ids
+                    },
+                    "client_energies": {
+                        cid: float(await redis_async.hget("fl:client_energy", cid) or 5.0)
+                        for cid in selected_ids
                     }
-                    next_state = self.selector._build_state(active_clients, next_context)
-                    self.selector.agent.update(
-                        self.selector.last_state,
-                        self.selector.last_action,
-                        reward,
-                        next_state,
-                        context=next_context
-                    )
-                    # Persist agent Q-table to Redis
+                }
+                
+                # Polymorphic policy update for any selector strategy (Q-Learning, PPO, DQN, AlphaZero, etc.)
+                self.selector.update_policy(round_summary)
+                
+                # Persist Q-table to Redis if agent maintains a q_table
+                if hasattr(self.selector, "agent") and hasattr(self.selector.agent, "q_table"):
                     await redis_async.set("fl:rl:q_table", json.dumps({k: v.tolist() for k, v in self.selector.agent.q_table.items()}))
                     
                 # Broadcast latest metrics to active clients
