@@ -15,6 +15,7 @@ import websockets
 import hashlib
 import ssl
 from codecarbon import EmissionsTracker
+import numpy as np
 
 # Argument parsing and environment variable configuration
 parser = argparse.ArgumentParser(description="Federated Learning Client Container")
@@ -82,6 +83,19 @@ def detect_device_specs():
     }
 
 
+def extract_s3_key(url: str) -> str:
+    """
+    Extracts the S3 object key from a presigned S3 URL.
+    """
+    # Remove query params
+    path = url.split("?")[0]
+    # S3 virtual host url format: https://<bucket>.s3.<region>.amazonaws.com/<key>
+    parts = path.split(".amazonaws.com/")
+    if len(parts) > 1:
+        return parts[1]
+    return path.split("/")[-1]
+
+
 class Client:
     def __init__(self, filepath, client_id, password=None, no_verify=False):
         self.client_id = client_id
@@ -95,7 +109,6 @@ class Client:
         self.global_metrics_history = []
 
     def authenticate(self):
-        # Resolve password
         psswd = self.password
         if not psswd:
             if os.path.exists("psswd.txt"):
@@ -110,7 +123,6 @@ class Client:
             initiate_url = f"{server_url}/initiate"
             payload = {"client_id": self.client_id}
             
-            # Configure SSL verify options
             verify_ssl = not self.no_verify
             if not verify_ssl:
                 import urllib3
@@ -127,9 +139,7 @@ class Client:
                 sys.exit(1)
                 
             # Step 2: Compute Cryptographic Response
-            # HashedPassword = SHA256(password)
             hashed_pwd = hashlib.sha256(psswd.encode('utf-8')).hexdigest()
-            # Response = SHA256(HashedPassword + challenge)
             response_hash = hashlib.sha256((hashed_pwd + challenge).encode('utf-8')).hexdigest()
             
             # Step 3: Submit Response and specs
@@ -206,7 +216,6 @@ class Client:
 
 async def simulate(client):
     try:
-        # Configure SSL context for websockets if secure protocol is active and verify is bypassed
         ssl_context = None
         if ws_url.startswith("wss://") and client.no_verify:
             ssl_context = ssl.create_default_context()
@@ -216,70 +225,88 @@ async def simulate(client):
         async with websockets.connect(ws_url + client.client_id, ssl=ssl_context, max_size=None) as ws:
             await ws.send("ready")
             while True:
-                msg = await ws.recv()
-                if msg == "train":
-                    print(f"[{client.client_id}] selected for training")
+                msg_text = await ws.recv()
+                event = json.loads(msg_text)
+                command = event.get("command")
+                
+                if command == "train":
+                    print(f"[{client.client_id}] Selected for weights training.")
+                    download_url = event["download_url"]
+                    upload_url = event["upload_url"]
 
+                    # 1. Download global model weights from S3
                     download_start = time.perf_counter()
-                    model_bytes = await ws.recv()
-                    if isinstance(model_bytes, str):
-                        model_bytes = model_bytes.encode('utf-8')
+                    response = requests.get(download_url)
                     download_latency = time.perf_counter() - download_start
+                    
                     model_path = f"models/global_model_{client.client_id}.keras"
                     with open(model_path, "wb") as f:
-                        f.write(model_bytes)
+                        f.write(response.content)
+                        
                     client.model.model.load_weights(model_path)
                     
                     # Evaluate pre-train metrics
                     pre_train_metrics = await asyncio.to_thread(client.model.evaluate)
                     train_loss = pre_train_metrics["total_loss"]
 
-                    # Initialize CodeCarbon EmissionsTracker
+                    # Start emissions tracker
                     tracker = EmissionsTracker(
                         project_name=f"client_{client.client_id}_round",
                         save_to_file=False,
                         log_level="error"
                     )
-
                     await asyncio.to_thread(tracker.start)
                     start_time = time.perf_counter()
 
+                    # Train locally for 1 epoch
                     await asyncio.to_thread(client.model.train, 1)
 
                     comp_latency = time.perf_counter() - start_time
                     await asyncio.to_thread(tracker.stop)
-                    
-                    # CodeCarbon tracks energy in kWh, convert to Joules (1 kWh = 3,600,000 Joules)
                     actual_energy_joules = tracker._total_energy.kWh * 3.6e6 if tracker._total_energy else 0.0
 
-                    client_model_path = f"models/client{client.client_id}_model.keras"
+                    # Save local trained model
+                    client_model_path = f"models/client_{client.client_id}_model.keras"
                     client.model.model.save(client_model_path)
                     
+                    # 2. Upload local model weights directly to S3
                     upload_start = time.perf_counter()
-                    await ws.send("FILE")
-                    await ws.send(str(client.samples))
-                    await ws.send(str(train_loss))
-                    await ws.send(str(comp_latency))
-                    await ws.send(str(actual_energy_joules))
-                    await ws.send(str(download_latency))
-                    
                     with open(client_model_path, "rb") as f:
-                        await ws.send(f.read())
-                    await ws.send("done")
+                        upload_resp = requests.put(upload_url, data=f)
                     upload_latency = time.perf_counter() - upload_start
-                    print(f"Download: {download_latency:.4f}s | Upload: {upload_latency:.4f}s")
+                    
+                    print(f"Upload status: {upload_resp.status_code} | Download: {download_latency:.4f}s | Upload: {upload_latency:.4f}s")
+                    
+                    # Send completion confirmation to server via WebSocket
+                    payload = {
+                        "status": "done",
+                        "s3_key": extract_s3_key(upload_url),
+                        "samples": client.samples,
+                        "loss": train_loss,
+                        "comp_latency": comp_latency,
+                        "measured_energy": actual_energy_joules,
+                        "download_latency": download_latency
+                    }
+                    await ws.send(json.dumps(payload))
                     client.current_round += 1
 
-                elif msg == "train_fv":
-                    print(f"[{client.client_id}] Gradient FedFV execution")
-                    model_bytes = await ws.recv()
-                    if isinstance(model_bytes, str):
-                        model_bytes = model_bytes.encode('utf-8')
+                elif command == "train_fv":
+                    print(f"[{client.client_id}] selected for FedFV gradient training.")
+                    download_url = event["download_url"]
+                    upload_url = event["upload_url"]
+
+                    # 1. Download global model weights from S3
+                    download_start = time.perf_counter()
+                    response = requests.get(download_url)
+                    download_latency = time.perf_counter() - download_start
+                    
                     model_path = f"models/global_model_{client.client_id}.keras"
                     with open(model_path, "wb") as f:
-                        f.write(model_bytes)
+                        f.write(response.content)
+                        
                     client.model.model.load_weights(model_path)
 
+                    # Start emissions tracker
                     tracker = EmissionsTracker(
                         project_name=f"client_{client.client_id}_round",
                         save_to_file=False,
@@ -288,55 +315,86 @@ async def simulate(client):
                     await asyncio.to_thread(tracker.start)
                     start_time = time.perf_counter()
 
-                    # Extract un-Adamized raw structural updates
+                    # Extract un-Adamized local gradients
                     local_grads, current_loss = await asyncio.to_thread(client.model.train_local_gradients_fv)
 
                     comp_latency = time.perf_counter() - start_time
                     await asyncio.to_thread(tracker.stop)
                     actual_energy_joules = tracker._total_energy.kWh * 3.6e6 if tracker._total_energy else 0.0
-                        
+                    
+                    # Save gradients into binary .npz file
+                    local_npz_path = f"models/client_{client.client_id}_gradients.npz"
+                    np.savez_compressed(local_npz_path, *local_grads)
+                    
+                    # 2. Upload local gradients directly to S3
+                    upload_start = time.perf_counter()
+                    with open(local_npz_path, "rb") as f:
+                        upload_resp = requests.put(upload_url, data=f)
+                    upload_latency = time.perf_counter() - upload_start
+                    
+                    print(f"Gradients upload status: {upload_resp.status_code} | Comp: {comp_latency:.4f}s")
+                    
+                    # Send completion confirmation to server via WebSocket
                     payload = {
-                        "gradients": [g.tolist() for g in local_grads],
-                        "loss": current_loss,
+                        "status": "done",
+                        "s3_key": extract_s3_key(upload_url),
                         "samples": client.samples,
+                        "loss": current_loss,
                         "comp_latency": comp_latency,
-                        "measured_energy": actual_energy_joules
+                        "measured_energy": actual_energy_joules,
+                        "download_latency": download_latency
                     }
                     await ws.send(json.dumps(payload))
+                    
+                    # Wait for global gradients response back from server
+                    msg_text_grads = await ws.recv()
+                    event_grads = json.loads(msg_text_grads)
+                    
+                    if event_grads.get("command") == "apply_gradients":
+                        global_gradients = event_grads["global_gradients"]
+                        await asyncio.to_thread(client.model.apply_global_gradients_fv, global_gradients, server_lr=0.001)
+                        print(f"[{client.client_id}] Applied global gradients resolved from FedFV.")
                         
-                    # Receive resolved steps back and apply manually
-                    server_response = await ws.recv()
-                    global_gradients = json.loads(server_response)
-                    await asyncio.to_thread(client.model.apply_global_gradients_fv, global_gradients, server_lr=0.001)
                     client.current_round += 1
                     
-                elif msg == "eval":
-                    print(f"[{client.client_id}] starting evaluation")
-                    model_bytes = await ws.recv()
-                    if isinstance(model_bytes, str):
-                        model_bytes = model_bytes.encode('utf-8')
+                elif command == "eval":
+                    print(f"[{client.client_id}] starting evaluation.")
+                    download_url = event["download_url"]
+                    
+                    # Download global model weights from S3
+                    response = requests.get(download_url)
                     model_path = f"models/global_model_{client.client_id}.keras"
                     with open(model_path, "wb") as f:
-                        f.write(model_bytes)
+                        f.write(response.content)
+                        
                     client.model.model.load_weights(model_path)
                     
+                    # Evaluate locally
                     local_met = await asyncio.to_thread(client.model.evaluate)
                     client.local_metrics_history.append(local_met)
 
-                    await ws.send("EVAL")
-                    await ws.send(str(client.samples))
-                    await ws.send(json.dumps(local_met))
-                elif msg == "metrics":
-                    metrics_str = await ws.recv()
+                    # Send evaluation results to server
+                    payload = {
+                        "status": "evaluated",
+                        "samples": client.samples,
+                        "metrics": local_met
+                    }
+                    await ws.send(json.dumps(payload))
+                    
+                elif command == "metrics":
+                    metrics_str = event["payload"]
                     global_met = json.loads(metrics_str)
                     client.global_metrics_history.append(global_met)
-                    print(f"[{client.client_id}] received global metrics")
-                elif msg == "wait":
-                    print(f"[{client.client_id}] Not selected")
-                elif msg == "exit":
-                    print(f"[{client.client_id}] Finished Training and Evaluation")
+                    print(f"[{client.client_id}] received global metrics.")
+                    
+                elif command == "wait":
+                    print(f"[{client.client_id}] Not selected.")
+                    
+                elif command == "exit":
+                    print(f"[{client.client_id}] Finished Training and Evaluation.")
                     client.plot_metrics()
                     return
+                    
     except websockets.exceptions.ConnectionClosed:
         print(f"[Client {client.client_id}] Server closed the connection.")
 
