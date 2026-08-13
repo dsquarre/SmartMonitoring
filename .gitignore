@@ -7,4 +7,8 @@ __pycache__
 *.pt
 *.npz
 *.keras
-
+*.csv
+*_debug_log.txt
+*.rdb
+tmp_s3_bucket/
+server/tmp_round_*/
