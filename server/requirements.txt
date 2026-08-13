@@ -7,3 +7,6 @@ bcrypt
 websockets
 matplotlib
 seaborn
+redis
+celery
+boto3
