@@ -42,8 +42,16 @@ S3_MOCK=true uvicorn main:app \
   --ssl-certfile ../certs/server.crt
 ```
 
-### Step 3: Launch Clients over HTTPS / WSS
-When connecting to a self-signed server, pass the `--no-verify` flag to bypass client-side Certificate Authority validation:
+### Step 3: Extract Certificate SHA-256 Fingerprint
+On the server, run the following command to get the certificate fingerprint:
+
+```bash
+openssl x509 -noout -fingerprint -sha256 -in certs/server.crt
+# Output: sha256 Fingerprint=12:0A:9E:87:19:A3:23:AF:49:4D:54:40:...
+```
+
+### Step 4: Launch Clients with Certificate Pinning (Recommended / MitM Safe)
+Pass the fingerprint via `-f` / `--fingerprint` (or set `CERT_FINGERPRINT` in `.env`). This provides **100% security against Man-in-the-Middle (MitM) attacks** without needing a domain name or paid CA:
 
 ```bash
 # In client/ directory
@@ -52,9 +60,9 @@ python main.py \
   -c client_0 \
   -p P7h1!quiBO0no96 \
   -d /path/to/dataset.npz \
-  --no-verify
+  -f 12:0A:9E:87:19:A3:23:AF:49:4D:54:40:67:87:80:CC:80:02:78:45:74:75:86:38:6D:5D:C3:94:67:E1:F2:7A
 ```
-*The client will automatically negotiate `wss://<YOUR_SERVER_IP>:8000/ws/client_0` over encrypted WebSockets.*
+*The client will verify the certificate fingerprint during SSL handshake. If an attacker attempts to intercept the connection with a fake certificate, the client will immediately drop the connection with `SSL Fingerprint Mismatch`.*
 
 ---
 

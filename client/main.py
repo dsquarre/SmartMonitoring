@@ -12,6 +12,7 @@ import json
 import platform
 import subprocess
 import websockets
+import socket
 import hashlib
 import ssl
 from codecarbon import EmissionsTracker
@@ -23,12 +24,38 @@ try:
 except ImportError:
     pass
 
+def verify_ssl_fingerprint(host: str, port: int, expected_fingerprint: str):
+    """
+    Connects to the server over SSL and verifies that its certificate SHA-256 fingerprint
+    matches expected_fingerprint to prevent Man-in-the-Middle (MitM) attacks.
+    """
+    clean_expected = expected_fingerprint.replace(":", "").lower()
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+
+    with socket.create_connection((host, port), timeout=10) as sock:
+        with ctx.wrap_socket(sock) as ssock:
+            der_cert = ssock.getpeercert(binary_form=True)
+            if not der_cert:
+                raise ssl.SSLError("Server did not present an SSL certificate.")
+            actual_hash = hashlib.sha256(der_cert).hexdigest().lower()
+            if actual_hash != clean_expected:
+                raise ssl.SSLError(
+                    f"SSL Fingerprint Mismatch! Potential MitM Attack Detected.\n"
+                    f"Expected: {clean_expected}\n"
+                    f"Actual:   {actual_hash}"
+                )
+            print(f"[SSL Security] Server certificate SHA-256 fingerprint verified ({actual_hash[:16]}...).")
+            return True
+
 # Argument parsing and environment variable configuration
 parser = argparse.ArgumentParser(description="Federated Learning Client Container")
 parser.add_argument("-d", "--dataset", type=str, required=True, help="Path to the dataset .npz file")
 parser.add_argument("-s", "--server-ip", type=str, default=os.environ.get("SERVER_IP"), help="IP address of the server")
 parser.add_argument("-p", "--password", type=str, default=os.environ.get("PASSWORD"), help="Authentication password")
 parser.add_argument("-c", "--client-id", type=str, default=os.environ.get("CLIENT_ID", "client_0"), help="Unique Client Identifier")
+parser.add_argument("-f", "--fingerprint", type=str, default=os.environ.get("CERT_FINGERPRINT"), help="Expected SHA-256 SSL certificate fingerprint for pinning")
 parser.add_argument("--no-verify", "--insecure", action="store_true", default=os.environ.get("NO_VERIFY", "").lower() in ("true", "1", "yes"), help="Bypass SSL certificate verification")
 args = parser.parse_args()
 
@@ -52,6 +79,14 @@ if "://" in ip:
 else:
     server_url = f"http://{ip}"
     ws_url = f"ws://{ip}/ws/"
+
+# Execute Certificate Pinning check if fingerprint is provided
+fingerprint = args.fingerprint
+if fingerprint and server_url.startswith("https://"):
+    host_clean = host.split("/")[0]
+    host_ip = host_clean.split(":")[0]
+    port_num = int(host_clean.split(":")[1]) if ":" in host_clean else 443
+    verify_ssl_fingerprint(host_ip, port_num, fingerprint)
 
 os.makedirs('models', exist_ok=True)
 os.makedirs('metrics', exist_ok=True)
