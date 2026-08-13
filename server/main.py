@@ -694,3 +694,28 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
         ws_task.cancel()
         redis_task.cancel()
         await redis_async.srem("fl:active_clients", client_id)
+
+# ----------------------------------------------------
+# S3 MOCK ENDPOINTS (For offline local verification)
+# ----------------------------------------------------
+from fastapi.responses import FileResponse
+from fastapi import Request
+
+MOCK_S3_DIR = os.environ.get("MOCK_S3_DIR", "tmp_s3_bucket")
+
+@app.get("/mock-s3/download")
+async def mock_s3_download(key: str):
+    file_path = os.path.join(MOCK_S3_DIR, key)
+    if not os.path.exists(file_path):
+        return JSONResponse(status_code=404, content={"error": f"File not found in mock S3: {key}"})
+    return FileResponse(file_path)
+
+@app.put("/mock-s3/upload")
+async def mock_s3_upload(key: str, request: Request):
+    file_path = os.path.join(MOCK_S3_DIR, key)
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    body = await request.body()
+    with open(file_path, "wb") as f:
+        f.write(body)
+    print(f"[Mock S3 Route] Saved uploaded file to {file_path} (size: {len(body)} bytes)")
+    return {"status": "success"}
