@@ -14,6 +14,8 @@ ws_url = "ws://127.0.0.1:8000/ws/"
 password = "P7h1!quiBO0no96"
 
 def extract_s3_key(url: str) -> str:
+    if "key=" in url:
+        return url.split("key=")[1].split("&")[0]
     path = url.split("?")[0]
     parts = path.split(".amazonaws.com/")
     if len(parts) > 1:
