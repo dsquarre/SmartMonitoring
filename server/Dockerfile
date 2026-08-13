@@ -15,5 +15,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application source code
 COPY . .
 
-# Default command to run client
-ENTRYPOINT ["python", "main.py"]
+# Expose port
+EXPOSE 8000
+
+# Default command to run FastAPI server
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

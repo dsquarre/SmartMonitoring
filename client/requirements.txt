@@ -6,3 +6,4 @@ websockets
 matplotlib
 seaborn
 codecarbon
+python-dotenv
