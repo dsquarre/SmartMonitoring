@@ -83,9 +83,8 @@ async def run_mock_client(client_id):
                     await asyncio.sleep(1.0) # 1 second mock training
                     
                     # 3. Simulate S3 upload
-                    dummy_model_bytes = b"mock_trained_model_weights_data_" + os.urandom(100)
                     up_start = time.perf_counter()
-                    up_res = requests.put(upload_url, data=dummy_model_bytes)
+                    up_res = requests.put(upload_url, data=resp.content)
                     up_latency = time.perf_counter() - up_start
                     print(f"[{client_id}] Mock-uploaded weights. HTTP Status: {up_res.status_code} in {up_latency:.4f}s")
                     
@@ -117,11 +116,35 @@ async def run_mock_client(client_id):
                     await asyncio.sleep(1.0)
                     
                     # 3. Create dummy gradients file and upload
-                    dummy_gradient_bytes = b"mock_gradients_data"
-                    up_start = time.perf_counter()
-                    up_res = requests.put(upload_url, data=dummy_gradient_bytes)
-                    up_latency = time.perf_counter() - up_start
-                    print(f"[{client_id}] Mock-uploaded gradients. HTTP Status: {up_res.status_code}")
+                    import tensorflow as tf
+                    import numpy as np
+                    
+                    temp_keras_path = f"temp_global_model_{client_id}.keras"
+                    with open(temp_keras_path, "wb") as f:
+                        f.write(resp.content)
+                        
+                    try:
+                        model = tf.keras.models.load_model(temp_keras_path)
+                        dummy_grads = [np.random.normal(0, 0.01, size=v.shape).astype(np.float32) for v in model.trainable_variables]
+                        
+                        temp_npz_path = f"temp_grads_{client_id}.npz"
+                        np.savez(temp_npz_path, *dummy_grads)
+                        
+                        with open(temp_npz_path, "rb") as f:
+                            npz_bytes = f.read()
+                            
+                        up_start = time.perf_counter()
+                        up_res = requests.put(upload_url, data=npz_bytes)
+                        up_latency = time.perf_counter() - up_start
+                        print(f"[{client_id}] Mock-uploaded gradients. HTTP Status: {up_res.status_code}")
+                        
+                        if os.path.exists(temp_keras_path):
+                            os.remove(temp_keras_path)
+                        if os.path.exists(temp_npz_path):
+                            os.remove(temp_npz_path)
+                    except Exception as e:
+                        print(f"[{client_id}] Error generating gradients: {e}")
+                        raise
                     
                     # 4. Notify server via WebSocket
                     payload = {
