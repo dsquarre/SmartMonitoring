@@ -3,7 +3,7 @@ import shutil
 import json
 import numpy as np
 from celery import Celery
-import boto3
+from s3_helper import download_file, upload_file
 
 # Initialize Celery app
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
@@ -53,7 +53,7 @@ def aggregate_models_task(
     from model import Model
     from aggregator import FedAvg, qFedAvg, FedAdam, FedFV
     
-    s3_client = boto3.client("s3")
+    # Using s3_helper functions for uploads and downloads
     local_dir = f"tmp_round_{current_round}"
     os.makedirs(local_dir, exist_ok=True)
     
@@ -87,9 +87,8 @@ def aggregate_models_task(
     prev_global_local_path = os.path.join(local_dir, f"global_model_{current_round - 1}.keras")
     next_global_local_path = os.path.join(local_dir, f"global_model_{current_round}.keras")
 
-    # Download previous global model
     print(f"[Celery Worker] Downloading previous global model from S3: {prev_global_s3_key}")
-    s3_client.download_file(s3_bucket, prev_global_s3_key, prev_global_local_path)
+    download_file(prev_global_s3_key, prev_global_local_path)
     shutil.copyfile(prev_global_local_path, next_global_local_path)
 
     # Process client uploads
@@ -110,7 +109,7 @@ def aggregate_models_task(
 
                 # Download gradients npz file
                 local_npz_path = os.path.join(local_dir, f"client_{client_id}_gradients.npz")
-                s3_client.download_file(s3_bucket, s3_key, local_npz_path)
+                download_file(s3_key, local_npz_path)
                 temp_files.append(local_npz_path)
                 
                 # Load client gradients from the npz file
@@ -155,7 +154,7 @@ def aggregate_models_task(
 
                 # Download local weights .keras file
                 local_keras_path = os.path.join(local_dir, f"client_{client_id}_model.keras")
-                s3_client.download_file(s3_bucket, s3_key, local_keras_path)
+                download_file(s3_key, local_keras_path)
                 temp_files.append(local_keras_path)
                 
                 client_data.append((
@@ -175,7 +174,7 @@ def aggregate_models_task(
 
         # Upload new global model to S3
         print(f"[Celery Worker] Uploading aggregated global model to S3: {next_global_s3_key}")
-        s3_client.upload_file(next_global_local_path, s3_bucket, next_global_s3_key)
+        upload_file(next_global_local_path, next_global_s3_key)
         
     finally:
         # Cleanup all temp files
