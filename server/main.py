@@ -631,6 +631,10 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
         await redis_async.srem("fl:active_clients", client_id)
         return
         
+    # Bridge Redis Pub/Sub to Client WebSocket
+    pubsub = redis_async.pubsub()
+    await pubsub.subscribe(f"client:ws:{client_id}")
+
     # Check client start count
     active_count = await redis_async.scard("fl:active_clients")
     is_running = await redis_async.get("fl:is_running") == "true"
@@ -643,10 +647,6 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
             manager.is_running = True
             print("Required client count met. Launching FL Coordinator task...")
             asyncio.create_task(manager.start())
-            
-    # Bridge Redis Pub/Sub to Client WebSocket
-    pubsub = redis_async.pubsub()
-    await pubsub.subscribe(f"client:ws:{client_id}")
     
     async def redis_to_ws():
         try:
