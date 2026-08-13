@@ -1,4 +1,11 @@
 import os
+import sys
+
+# Add current directory to sys.path to resolve local imports (model, aggregator) in prefork workers
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.insert(0, current_dir)
+
 import shutil
 import json
 import numpy as np
