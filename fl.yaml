@@ -12,11 +12,49 @@ Resources:
                   FromPort: 8000
                   ToPort: 8000
                   CidrIp: 0.0.0.0/0
+    IAMRole:
+        Type: AWS::IAM::Role
+        Properties:
+            AssumeRolePolicyDocument:
+                Version: "2012-10-17"
+                Statement:
+                    - Effect: Allow
+                      Principal:
+                          Service:
+                              - ec2.amazonaws.com
+                      Action:
+                          - sts:AssumeRole
+            Policies:
+                - PolicyName: S3AccessPolicy
+                  PolicyDocument:
+                      Version: "2012-10-17"
+                      Statement:
+                          - Effect: Allow
+                            Action:
+                                - s3:*
+                            Resource:
+                                - !Sub "arn:aws:s3:::fl-model-storage-${AWS::AccountId}-${AWS::Region}"
+                                - !Sub "arn:aws:s3:::fl-model-storage-${AWS::AccountId}-${AWS::Region}/*"
+    InstanceProfile:
+        Type: AWS::IAM::InstanceProfile
+        Properties:
+            Roles:
+                - !Ref IAMRole
+    S3Bucket:
+        Type: AWS::S3::Bucket
+        Properties:
+            BucketName: !Sub "fl-model-storage-${AWS::AccountId}-${AWS::Region}"
+            PublicAccessBlockConfiguration:
+                BlockPublicAcls: true
+                BlockPublicPolicy: true
+                IgnorePublicAcls: true
+                RestrictPublicBuckets: true
     Server:
         Type: AWS::EC2::Instance
         Properties:
             SecurityGroups:
                 - !Ref SecurityGroup
+            IamInstanceProfile: !Ref InstanceProfile
             ImageId: ami-0388e3ada3d9812da
             BlockDeviceMappings:
                 - DeviceName: /dev/sda1
@@ -28,7 +66,9 @@ Resources:
             UserData: !Base64 |
                 #!/bin/bash
                 apt update -y
-                sudo apt install python3-pip python3-venv python3-dev -y
+                sudo apt install python3-pip python3-venv python3-dev redis-server -y
+                sudo systemctl enable redis-server
+                sudo systemctl start redis-server
                 mkdir -p /home/ubuntu/.ssh
                 echo "ssh-rsa key" >> /home/ubuntu/.ssh/authorized_keys
                 chown -R ubuntu:ubuntu /home/ubuntu/.ssh
@@ -41,6 +81,7 @@ Resources:
                 cd SmartMonitoring/server
                 python3 -m venv venv
                 venv/bin/pip3 install -r requirements.txt
+                nohup venv/bin/celery -A celery_app worker --loglevel=info > celery_log.txt 2>&1 &
                 nohup venv/bin/python3 -m uvicorn main:app --host 0.0.0.0 --port 8000 > server_log.txt 2>&1 &
     Client1:
         Type: AWS::EC2::Instance
