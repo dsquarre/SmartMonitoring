@@ -59,12 +59,30 @@ def aggregate_models_task(
         For gradients mode (FedFV):
             [{"client_id": "client_x", "numeric_id": 1, "s3_key": "...", "samples": 100, "loss": 0.5, "comp_latency": 1.2, "measured_energy": 5.0}, ...]
     """
-    # Import locally to avoid issues during Celery boot (since tensorflow is slow to load)
-    from model import Model
-    from aggregator import FedAvg, qFedAvg, FedAdam, FedFV
+    import os
+    import sys
+    print(f"[Celery Worker] aggregate_models_task started. Cwd: {os.getcwd()}")
+    
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    print(f"[Celery Worker] Appending {current_dir} to sys.path...")
+    if current_dir not in sys.path:
+        sys.path.insert(0, current_dir)
+    print(f"[Celery Worker] sys.path is now: {sys.path}")
+        
+    try:
+        print("[Celery Worker] Importing Model and Aggregator strategies...")
+        from model import Model
+        from aggregator import FedAvg, qFedAvg, FedAdam, FedFV
+        print("[Celery Worker] Import successful!")
+    except Exception as e:
+        print(f"[Celery Worker] [ERROR] Failed to import local modules: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
     
     # Using s3_helper functions for uploads and downloads
     local_dir = f"tmp_round_{current_round}"
+    print(f"[Celery Worker] Creating local directory {local_dir}")
     os.makedirs(local_dir, exist_ok=True)
     
     # Instantiate the aggregator
