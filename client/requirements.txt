@@ -1,6 +1,6 @@
 tensorflow
 requests
-numpy
+numpy<2
 scikit-learn
 websockets
 matplotlib
