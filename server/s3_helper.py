@@ -4,6 +4,12 @@ import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 # Read configuration from environment variables
 S3_BUCKET = os.environ.get("S3_BUCKET", "fl-model-storage")
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")

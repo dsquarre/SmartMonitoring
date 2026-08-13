@@ -28,6 +28,12 @@ from s3_helper import (
 )
 from celery_app import aggregate_models_task
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 # Configuration variables
 N = int(os.environ.get("FL_N", "10"))
 K = int(os.environ.get("FL_K", "3"))

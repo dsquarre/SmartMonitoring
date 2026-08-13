@@ -17,6 +17,12 @@ import ssl
 from codecarbon import EmissionsTracker
 import numpy as np
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 # Argument parsing and environment variable configuration
 parser = argparse.ArgumentParser(description="Federated Learning Client Container")
 parser.add_argument("-d", "--dataset", type=str, required=True, help="Path to the dataset .npz file")
