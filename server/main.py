@@ -433,7 +433,7 @@ class FederatedServer:
                     "download_latency": u.get("download_latency", 0.0)
                 })
                 
-            print("Dispatching Celery aggregation task...")
+            print(f"[DEBUG] Dispatching Celery aggregation task: strategy={self.aggregator.__class__.__name__}, round={current_round + 1}, uploads_count={len(uploads_payload)}, bucket={bucket}")
             task = aggregate_models_task.delay(
                 strategy_name=self.aggregator.__class__.__name__,
                 strategy_config=strategy_config,
@@ -444,13 +444,26 @@ class FederatedServer:
             
             # Poll Celery status
             while not task.ready():
+                print(f"[DEBUG] Polling Celery task {task.id} (current state: {task.state})")
                 await asyncio.sleep(0.5)
                 
             celery_res = task.result
+            print(f"[DEBUG] Celery task finished. Result type: {type(celery_res)}, state: {task.state}")
+            
+            if task.failed() or isinstance(celery_res, Exception) or not isinstance(celery_res, dict):
+                print(f"[ERROR] Celery aggregation task failed: {celery_res}")
+                if hasattr(task, "traceback") and task.traceback:
+                    print(f"[ERROR] Celery task traceback:\n{task.traceback}")
+                # Reset coordinator state and exit
+                await redis_async.set("fl:is_running", "false")
+                self.is_running = False
+                return
+                
             if celery_res.get("status") != "success":
-                print(f"[ERROR] Celery aggregation failed: {celery_res}")
-                await asyncio.sleep(5)
-                continue
+                print(f"[ERROR] Celery aggregation returned unsuccessful status: {celery_res}")
+                await redis_async.set("fl:is_running", "false")
+                self.is_running = False
+                return
                 
             # If gradients-based, broadcast final aggregated gradients back to clients
             if self.aggregator.mode == "gradients":
