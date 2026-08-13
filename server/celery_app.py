@@ -6,7 +6,7 @@ from celery import Celery
 from s3_helper import download_file, upload_file
 
 # Initialize Celery app
-REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0?protocol=2")
+REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 celery_app = Celery(
     "fl_tasks",
     broker=REDIS_URL,
