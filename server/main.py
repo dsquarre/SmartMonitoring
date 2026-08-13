@@ -19,89 +19,77 @@ from rl_env import FederatedEnv
 import hashlib
 import hmac
 
+import redis
+import redis.asyncio as aioredis
+import boto3
+from s3_helper import (
+    generate_presigned_download_url,
+    generate_presigned_upload_url,
+    upload_file,
+    get_bucket_name
+)
+from celery_app import aggregate_models_task
 
-client_id_map = {}
-next_numeric_id = 0
+# Configuration variables
+N = int(os.environ.get("FL_N", "10"))
+K = int(os.environ.get("FL_K", "3"))
+ROUNDS = int(os.environ.get("FL_ROUNDS", "2"))
+REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 
-#vars
-N = 10
-K = 3
-rounds_left = 2
-clients = set()
+# Redis clients
+redis_sync = redis.from_url(REDIS_URL, decode_responses=True)
+redis_async = aioredis.from_url(REDIS_URL, decode_responses=True)
+
 app = FastAPI()
-current_round = 0
-client_metrics = deque()
-round_history = []
 
-os.makedirs('models', exist_ok=True)
+# Ensure S3 Bucket structure is initialized on startup
+@app.on_event("startup")
+async def startup_event():
+    # Reset transient state in Redis
+    await redis_async.delete("fl:active_clients")
+    await redis_async.set("fl:is_running", "false")
+    await redis_async.set("fl:current_round", "0")
+    await redis_async.set("fl:rounds_left", str(ROUNDS))
+    await redis_async.delete("fl:round_history")
+    
+    # Initialize static client profiles in Redis if empty
+    profiles_exist = await redis_async.exists("fl:client_profiles")
+    if not profiles_exist:
+        for i in range(100):
+            profile = {
+                "cpu_frequency": float(random.choice([1.2e9, 1.6e9, 2.0e9, 2.4e9, 2.8e9])),
+                "tx_power": float(random.choice([0.1, 0.2, 0.3, 0.4, 0.5])),
+                "r_trans": float(random.choice([5e6, 10e6, 15e6, 20e6, 30e6]))
+            }
+            await redis_async.hset("fl:client_profiles", str(i), json.dumps(profile))
+
+    # Verify initial global model exists in S3, if not build and upload
+    bucket = get_bucket_name()
+    s3_client = boto3.client("s3")
+    try:
+        s3_client.head_object(Bucket=bucket, Key="models/global/global_model_0.keras")
+        print("Found initial global model in S3.")
+    except Exception:
+        print("Initial global model not found in S3. Creating and uploading...")
+        os.makedirs("models", exist_ok=True)
+        model = Model()
+        model_path = "models/global_model_0.keras"
+        model.model.save(model_path)
+        upload_file(model_path, "models/global/global_model_0.keras")
+        os.remove(model_path)
+        os.rmdir("models")
 
 if not os.path.exists('upload_log.csv'):
     with open('upload_log.csv', 'w', newline='') as f:
         writer = csv.writer(f)
         writer.writerow(["timestamp", "client_id", "filename", "weight", "round"])
 
-if not os.path.exists("models/global_model_0.keras"):
-    model = Model()
-    model.model.save("models/global_model_0.keras")
-    print(f"Created initial global model at global_model_0.keras")
-
-def generate_id():
-    a = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
-    n = len(a)
-    l = (random.randint(16,32))
-    word = ''
-    for i in range(l):
-        b = (random.randint(0,n-1))
-        word += a[b]
-    return word
-
-def log_upload(client_id, filename, weight):
+def log_upload(client_id, filename, weight, round_num):
     with open('upload_log.csv', 'a', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow([datetime.now().isoformat(), client_id, filename, weight, current_round + 1])
+        writer.writerow([datetime.now().isoformat(), client_id, filename, weight, round_num])
 
-
-def evaluate(current_round_uploads):
-    global client_metrics, current_round, round_history, N
-    #print(client_metrics)
-    #client_metrics is a deque of tuple (local_metrics,samples)->(dict,int)
-    if len(client_metrics) >= N:
-        total_samples = sum(samples for _, samples in client_metrics)
-        metric_names = client_metrics[0][0].keys()
-        round_metrics = {}
-        for metric in metric_names:
-            weighted_metric = 0.0
-            for metrics, samples in client_metrics:
-                weighted_metric += (metrics[metric]* (samples/total_samples))
-            round_metrics[metric] = weighted_metric
-        round_metrics["round"] = current_round
-
-        if current_round_uploads:
-            total_latencies = [upload[4] for upload in current_round_uploads if upload]
-            total_energies = [upload[5] for upload in current_round_uploads if upload]
-            total_dl_latencies = [upload[6] for upload in current_round_uploads if upload and len(upload) > 6]
-            
-            round_metrics["avg_comp_latency"] = np.mean(total_latencies)
-            round_metrics["max_comp_latency"] = np.max(total_latencies)
-            round_metrics["avg_energy_consumed"] = np.mean(total_energies)
-            round_metrics["total_round_energy"] = np.sum(total_energies)
-            round_metrics["avg_download_latency"] = np.mean(total_dl_latencies) if total_dl_latencies else 0.0
-        else:
-            round_metrics["avg_comp_latency"] = 0.0
-            round_metrics["max_comp_latency"] = 0.0
-            round_metrics["avg_energy_consumed"] = 0.0
-            round_metrics["total_round_energy"] = 0.0
-            round_metrics["avg_download_latency"] = 0.0
-
-        round_history.append(round_metrics)
-        with open("global_metrics.txt", "a") as f:
-            f.write(str(round_metrics) + "\n")
-
-        plot_metrics()
-        client_metrics.clear()
-
-def plot_metrics():
-
+def plot_metrics_local(round_history):
     import matplotlib.pyplot as plt
     import matplotlib
     import seaborn as sns
@@ -111,19 +99,11 @@ def plot_metrics():
     if len(round_history) == 0:
         return
 
-    rounds = [
-        x["round"]
-        for x in round_history
-    ]
+    rounds = [x["round"] for x in round_history]
 
-    #loss
+    # loss
     plt.figure(figsize=(8, 5))
-    plt.plot(
-    rounds,
-    [x["total_loss"] for x in round_history],
-    marker='o',
-    label='Total Loss'
-    )
+    plt.plot(rounds, [x["total_loss"] for x in round_history], marker='o', label='Total Loss')
     plt.xlabel("Federated Round")
     plt.ylabel("Loss")
     plt.title("Loss vs Federated Round")
@@ -132,20 +112,10 @@ def plot_metrics():
     plt.savefig("loss_vs_round.png")
     plt.close()
 
-    #accuracy
+    # accuracy
     plt.figure(figsize=(8, 5))
-    plt.plot(
-        rounds,
-        [x["anomaly_accuracy"] for x in round_history],
-        marker='o',
-        label='Anomaly Accuracy'
-    )
-    plt.plot(
-        rounds,
-        [x["disease_accuracy"] for x in round_history],
-        marker='o',
-        label='Disease Accuracy'
-    )
+    plt.plot(rounds, [x["anomaly_accuracy"] for x in round_history], marker='o', label='Anomaly Accuracy')
+    plt.plot(rounds, [x["disease_accuracy"] for x in round_history], marker='o', label='Disease Accuracy')
     plt.xlabel("Federated Round")
     plt.ylabel("Accuracy")
     plt.title("Accuracy vs Federated Round")
@@ -154,14 +124,9 @@ def plot_metrics():
     plt.savefig("accuracy_vs_round.png")
     plt.close()
 
-    #F1
+    # F1
     plt.figure(figsize=(8, 5))
-    plt.plot(
-        rounds,
-        [x["disease_f1"] for x in round_history],
-        marker='o'
-    )
-
+    plt.plot(rounds, [x["disease_f1"] for x in round_history], marker='o', label='Disease F1')
     plt.xlabel("Federated Round")
     plt.ylabel("Disease F1 Score")
     plt.title("Disease F1 vs Federated Round")
@@ -170,17 +135,15 @@ def plot_metrics():
     plt.savefig("f1_vs_round.png")
     plt.close()
 
-    print("Metric plots saved.")
-
+    # Resources
     fig, ax1 = plt.subplots(figsize=(8, 5))
-
     color = 'tab:red'
     ax1.set_xlabel('Federated Round')
     ax1.set_ylabel('Avg Latency (seconds)', color=color)
     ax1.plot(rounds, [x.get("avg_comp_latency", 0) for x in round_history], marker='o', color=color, label='Latency')
     ax1.tick_params(axis='y', labelcolor=color)
 
-    ax2 = ax1.twinx()  # Instantiate a second axes that shares the same x-axis
+    ax2 = ax1.twinx()
     color = 'tab:green'
     ax2.set_ylabel('Total Round Energy (Joules)', color=color)
     ax2.plot(rounds, [x.get("total_round_energy", 0) for x in round_history], marker='s', color=color, label='Energy')
@@ -191,32 +154,8 @@ def plot_metrics():
     plt.grid(True, linestyle=':')
     plt.savefig("system_resources_vs_round.png")
     plt.close()
+    print("Metric plots saved locally.")
 
-"""
-client_metrics format:
-
-[
-    (
-        {
-            "anomaly_accuracy": 0.94,
-            "disease_accuracy": 0.91,
-            "disease_f1": 0.90
-        },
-
-        n1
-    ),
-
-    (
-        {
-            "anomaly_accuracy": 0.95,
-            "disease_accuracy": 0.93,
-            "disease_f1": 0.92
-        },
-
-        n2
-    )
-]
-"""
 def load_credentials():
     credentials_path = os.path.join(os.path.dirname(__file__), "credentials.json")
     if os.path.exists(credentials_path):
@@ -234,15 +173,13 @@ async def initiate_auth(payload: dict = Body(...)):
     if client_id not in credentials:
         return JSONResponse(status_code=401, content={"error": "Unauthorized client ID"})
     
-    # Generate a cryptographically secure challenge
     challenge = os.urandom(32).hex()
-    manager.challenges[client_id] = challenge
+    await redis_async.setex(f"fl:challenge:{client_id}", 300, challenge)
     
     return {"challenge": challenge}
 
 @app.post("/authenticate")
 async def authenticate_client(payload: dict = Body(...)):
-    global next_numeric_id, client_id_map, clients
     client_id = payload.get("client_id")
     response = payload.get("response")
     specs = payload.get("specs", {})
@@ -250,7 +187,7 @@ async def authenticate_client(payload: dict = Body(...)):
     if not client_id or not response:
         return JSONResponse(status_code=400, content={"error": "Missing client_id or response"})
     
-    challenge = manager.challenges.get(client_id)
+    challenge = await redis_async.get(f"fl:challenge:{client_id}")
     if not challenge:
         return JSONResponse(status_code=400, content={"error": "No active challenge for this client"})
     
@@ -259,381 +196,481 @@ async def authenticate_client(payload: dict = Body(...)):
     if not stored_hash:
         return JSONResponse(status_code=401, content={"error": "Unauthorized client ID"})
     
-    # Compute expected response: SHA256(stored_hash + challenge)
     expected = hashlib.sha256((stored_hash + challenge).encode('utf-8')).hexdigest()
     
-    # Constant-time comparison
     if not hmac.compare_digest(response, expected):
         print(f"Invalid authentication response from client: {client_id}")
         return JSONResponse(status_code=401, content={"error": "Authentication failed"})
     
-    # Clean up used challenge
-    del manager.challenges[client_id]
+    await redis_async.delete(f"fl:challenge:{client_id}")
+    await redis_async.setex(f"fl:auth:{client_id}", 86400, "true")
     
-    # Authorize the client
-    manager.authenticated_clients.add(client_id)
-    clients.add(client_id)
+    # Register client spec mapping CPU profile
+    cpu_freq = float(specs.get("cpu_frequency", 2.0e9))
+    tx_power = float(specs.get("tx_power", 0.2))
     
-    if client_id not in client_id_map:
-        num_id = next_numeric_id
-        client_id_map[client_id] = num_id
-        next_numeric_id += 1
-        
-        manager.env.profiles[num_id] = {
-            "cpu_frequency": float(specs.get("cpu_frequency", 2.0e9)),
-            "tx_power": float(specs.get("tx_power", 0.2)),
-            "r_trans": 15e6
-        }
+    # Store numeric ID mapping dynamically
+    num_id = await redis_async.hget("fl:client_id_map", client_id)
+    if num_id is None:
+        num_id = await redis_async.incr("fl:next_numeric_id") - 1
+        await redis_async.hset("fl:client_id_map", client_id, str(num_id))
+    else:
+        num_id = int(num_id)
+
+    # Persist connection profile in Redis HASH
+    profile = {
+        "cpu_frequency": cpu_freq,
+        "tx_power": tx_power,
+        "r_trans": 15e6
+    }
+    await redis_async.hset("fl:client_profiles", str(num_id), json.dumps(profile))
     
-    print(f"Client {client_id} successfully authenticated and registered with specs: {specs}. Connected: {len(clients)}")
+    print(f"Client {client_id} successfully authenticated and registered (numeric ID: {num_id}).")
     return {"status": "authenticated", "your_id": client_id}
 
 
 class FederatedServer:
     def __init__(self, selector=None, aggregator=None):
-        self.clients = {}
-        self.client_uploads = []
         self.is_running = False
         
-        # Initialize BEFL Environment and Client Profiles
-        profiles = {
-            i: {
-                "cpu_frequency": float(random.choice([1.2e9, 1.6e9, 2.0e9, 2.4e9, 2.8e9])),
-                "tx_power": float(random.choice([0.1, 0.2, 0.3, 0.4, 0.5])),
-                "r_trans": float(random.choice([5e6, 10e6, 15e6, 20e6, 30e6]))
+        # Build profiles placeholder (will sync with Redis values at runtime)
+        profiles = {}
+        for i in range(100):
+            profiles[i] = {
+                "cpu_frequency": 2.0e9,
+                "tx_power": 0.2,
+                "r_trans": 15e6
             }
-            for i in range(100)
-        }
+            
         self.env = FederatedEnv(profiles, model_size_bits=10_000_000)
         self.agent = QLearningAgent()
         
-        # DB to track latest client metrics persistently
-        self.client_samples_db = {}
-        self.client_losses_db = {}
-        self.client_latency_db = {}
-        self.client_energy_db = {}
-        self.challenges = {}
-        self.authenticated_clients = set()
-        
+        # Load Q-table from Redis if available
+        try:
+            q_data = redis_sync.get("fl:rl:q_table")
+            if q_data:
+                q_dict = json.loads(q_data)
+                self.agent.q_table = {k: np.array(v, dtype=np.float32) for k, v in q_dict.items()}
+                print("Successfully loaded RL agent Q-table from Redis.")
+        except Exception as e:
+            print(f"Could not load Q-table: {e}")
+            
         self.selector = selector or RLClientSelector(self.agent, self.env)
-        self.aggregator = aggregator or FedAvg() or FedFV(num_clients=K, alpha=0.1, tau=1)
-
-    async def connect(self, client_id, websocket: WebSocket):
-        self.clients[client_id] = websocket
-        msg = await websocket.receive_text()
-        if msg != "ready":
-            print(f"Unexpected message from {client_id}: {msg}")
-
-
-    def disconnect(self,client_id):
-        if client_id in self.clients:
-            del self.clients[client_id]
+        self.aggregator = aggregator or FedAvg()
 
     async def start(self):
-        global rounds_left, current_round, K
+        global K, ROUNDS
+        
+        rounds_left = ROUNDS
+        current_round = 0
+        bucket = get_bucket_name()
+        
+        await redis_async.set("fl:current_round", "0")
+        await redis_async.set("fl:rounds_left", str(rounds_left))
+        
+        round_history = []
+        
         while rounds_left > 0:
             print(f"Starting round {current_round + 1}, rounds left: {rounds_left}")
-            self.client_uploads = []
-
-            client_ids = list(self.clients.keys())
             
-            # Pass profiles and dynamic metrics database in context
+            # Reset responses and uploads list for the round
+            await redis_async.delete(f"fl:round:{current_round}:uploads")
+            
+            active_clients = list(await redis_async.smembers("fl:active_clients"))
+            if len(active_clients) == 0:
+                print("No clients connected. Pausing orchestrator...")
+                await asyncio.sleep(5)
+                continue
+                
+            # Load current client profiles from Redis to keep env updated
+            client_id_map_raw = await redis_async.hgetall("fl:client_id_map")
+            client_id_map = {k: int(v) for k, v in client_id_map_raw.items()}
+            
+            profiles_raw = await redis_async.hgetall("fl:client_profiles")
+            for num_id_str, p_json in profiles_raw.items():
+                self.env.profiles[int(num_id_str)] = json.loads(p_json)
+                
+            client_samples_raw = await redis_async.hgetall("fl:client_samples")
+            client_samples = {k: float(v) for k, v in client_samples_raw.items()}
+            
+            client_losses_raw = await redis_async.hgetall("fl:client_losses")
+            client_losses = {k: float(v) for k, v in client_losses_raw.items()}
+            
             context = {
                 "round": current_round + 1,
                 "rounds_left": rounds_left,
                 "env": self.env,
                 "client_id_map": client_id_map,
-                "client_samples": self.client_samples_db,
-                "client_losses": self.client_losses_db
+                "client_samples": client_samples,
+                "client_losses": client_losses
             }
-            selected_ids = self.selector.select_clients(client_ids, K, context=context)
+            
+            # Run Selector
+            selected_ids = self.selector.select_clients(active_clients, K, context=context)
             selected_set = set(selected_ids)
             print(f"Selected clients for training: {selected_ids}")
-
-            #added
-            command = "train_fv" if self.aggregator.mode == "gradients" else "train"
-
-            send_tasks = []
-            for client_id, ws in self.clients.items():
-                if client_id in selected_set:
-                    send_tasks.append(ws.send_text(command))
-                else:
-                    send_tasks.append(ws.send_text("wait"))
-            await asyncio.gather(*send_tasks)
-
-            model_path = f"models/global_model_{current_round}.keras"
-            with open(model_path, "rb") as f:
-                model_bytes = f.read()
-
-            send_model_tasks = []
-            for client_id in selected_ids:
-                ws = self.clients[client_id]
-                send_model_tasks.append(ws.send_bytes(model_bytes))
-            await asyncio.gather(*send_model_tasks)
-
-            # Track response roundtrip times for selected clients
-            roundtrips = {}
-
-            if self.aggregator.mode == "gradients":
-                # Receive pure un-Adamized gradient payloads
-                start_time = time.time()
-                recv_tasks = [self.receive_raw_gradients(cid, self.clients[cid]) for cid in selected_ids]
-                results = await asyncio.gather(*recv_tasks)
-                elapsed = time.time() - start_time
-                for cid in selected_ids:
-                    roundtrips[cid] = elapsed
-                    
-                self.client_uploads = [r for r in results if r is not None]
-                
-                current_round += 1
-                next_global_model_path = f"models/global_model_{current_round}.keras"
-                shutil.copyfile(model_path, next_global_model_path) # Prepare file target destination
-                
-                # Execute FedFV aggregation algorithm
-                global_gt = self.aggregator.aggregate(
-                    self.client_uploads, next_global_model_path, current_round, ModelClass=Model
-                )
-                
-                # Manually process server weight optimization updates locally
-                global_model = Model()
-                global_model.model.load_weights(next_global_model_path)
-                
-                # FIX: Iterate and update trainable_variables directly instead of get_weights()
-                for var, gg in zip(global_model.model.trainable_variables, global_gt):
-                    # Perform element-wise subtraction directly on the tensor's underlying numpy array
-                    var.assign(var.read_value() - gg)
-                
-                # Save the properly modified model file
-                global_model.model.save(next_global_model_path)
-
-                # Broadcast final updates back to clients to finish their loop sequence
-                serialized_global_grad = json.dumps([g.tolist() for g in global_gt])
-                broadcast_tasks = [self.clients[cid].send_text(serialized_global_grad) for cid in selected_ids]
-                await asyncio.gather(*broadcast_tasks)
-                
-                print(f"Round {current_round} complete.")
-                rounds_left -= 1
-                uploads_snapshot = list(self.client_uploads)
-                self.client_uploads.clear()
-
-            else:
-                # Fall back to standard serialized weight transfers (.keras files)
-                start_time = time.time()
-                recv_tasks = []
-                for client_id in selected_ids:
-                    ws = self.clients[client_id]
-                    recv_tasks.append(self.receive_model(client_id, ws))
-
-                results = await asyncio.gather(*recv_tasks)
-                elapsed = time.time() - start_time
-                for cid in selected_ids:
-                    roundtrips[cid] = elapsed
-                    
-                for res in results:
-                    if res:
-                        self.client_uploads.append(res)
-                uploads_snapshot = list(self.client_uploads)
-
-                # Delegate directly to your original aggregation function layout
-                self.agg()
-
-            # 4. Standard Evaluation Flow (Kept Uniform)
-            print("Starting evaluation for the round.")
-            eval_send_tasks = []
-            for client_id, ws in self.clients.items():
-                eval_send_tasks.append(ws.send_text("eval"))
-            await asyncio.gather(*eval_send_tasks)
-
-            model_path = f"models/global_model_{current_round}.keras"
-            with open(model_path, "rb") as f:
-                model_bytes = f.read()
-
-            eval_model_tasks = []
-            for client_id, ws in self.clients.items():
-                eval_model_tasks.append(ws.send_bytes(model_bytes))
-            await asyncio.gather(*eval_model_tasks)
-
-            eval_recv_tasks = []
-            for client_id, ws in self.clients.items():
-                eval_recv_tasks.append(self.receive_eval(client_id, ws))
-
-            await asyncio.gather(*eval_recv_tasks)
-
-            evaluate(uploads_snapshot)
-
-            # --- RL Training Step ---
-            current_loss = round_history[-1]["total_loss"] if round_history else 1.0
-            prev_loss = round_history[-2]["total_loss"] if len(round_history) > 1 else current_loss
-            global_loss_delta = prev_loss - current_loss
             
-            selected_metrics = {}
-            for cid in selected_ids:
-                num_id = client_id_map.get(cid, 0)
-                samples = self.client_samples_db.get(cid, 1000)
-                measured_rt = roundtrips.get(cid, None)
-                actual_comp_lat = self.client_latency_db.get(cid, 1.0)
-                actual_meas_energy = self.client_energy_db.get(cid, 5.0)
-                selected_metrics[num_id] = self.env.compute_client_cost(
-                    num_id, samples, actual_comp_lat, actual_meas_energy, measured_rt
-                )
+            # Generate GET presigned URL for current global model weights
+            global_model_key = f"models/global/global_model_{current_round}.keras"
+            download_url = generate_presigned_download_url(global_model_key)
+            
+            mode_command = "train_fv" if self.aggregator.mode == "gradients" else "train"
+            
+            # Broadcast commands via Redis Pub/Sub channels
+            for cid in active_clients:
+                if cid in selected_set:
+                    # Generate presigned PUT URL for local weights upload
+                    if mode_command == "train_fv":
+                        client_upload_key = f"models/client/client_{cid}_round_{current_round + 1}_gradients.npz"
+                    else:
+                        client_upload_key = f"models/client/client_{cid}_round_{current_round + 1}.keras"
+                        
+                    upload_url = generate_presigned_upload_url(client_upload_key)
+                    payload = {
+                        "command": mode_command,
+                        "download_url": download_url,
+                        "upload_url": upload_url
+                    }
+                else:
+                    payload = {"command": "wait"}
+                    
+                await redis_async.publish(f"client:ws:{cid}", json.dumps(payload))
                 
-            local_losses = [self.client_losses_db.get(cid, 1.0) for cid in selected_ids]
-            reward = self.env.calculate_reward(selected_metrics, global_loss_delta, local_losses)
-            print(f"[RL Environment] Round {current_round} Stats:")
-            print(f"  - Delta Global Loss: {global_loss_delta:.4f}")
-            if selected_metrics:
-                print(f"  - Slowest Latency: {max(m['t_total'] for m in selected_metrics.values()):.4f} s")
-                print(f"  - Total Energy: {sum(m['E_total'] for m in selected_metrics.values()):.6f} J")
-            print(f"  - Calculated Reward: {reward:.4f}")
-
-            if isinstance(self.selector, RLClientSelector):
-                next_context = {
-                    "round": current_round,
-                    "rounds_left": rounds_left,
-                    "env": self.env,
-                    "client_id_map": client_id_map,
-                    "client_samples": self.client_samples_db,
-                    "client_losses": self.client_losses_db
+            # Wait for selected client uploads with timeout + disconnect recovery
+            start_wait = time.time()
+            try:
+                while True:
+                    uploads_raw = await redis_async.lrange(f"fl:round:{current_round}:uploads", 0, -1)
+                    uploads = [json.loads(u) for u in uploads_raw]
+                    uploaded_ids = {u["client_id"] for u in uploads}
+                    
+                    if len(uploaded_ids) >= len(selected_ids):
+                        break
+                        
+                    elapsed = time.time() - start_wait
+                    current_active = await redis_async.smembers("fl:active_clients")
+                    disconnected = [cid for cid in selected_ids if cid not in current_active]
+                    
+                    if disconnected:
+                        print(f"Selected client(s) {disconnected} disconnected! Re-running selection...")
+                        raise RuntimeError("Client disconnected")
+                        
+                    if elapsed > 300:
+                        print("Training phase timed out. Re-running selection...")
+                        raise RuntimeError("Round timed out")
+                        
+                    await asyncio.sleep(1)
+            except Exception as e:
+                print(f"Round training phase interrupted: {e}. Retrying selection in 5s...")
+                await asyncio.sleep(5)
+                continue
+                
+            elapsed_round = time.time() - start_wait
+            roundtrips = {cid: elapsed_round for cid in selected_ids}
+            
+            # Prepare configuration config dictionary to pass to Celery
+            strategy_config = {}
+            if isinstance(self.aggregator, qFedAvg):
+                strategy_config["q"] = self.aggregator.q
+            elif isinstance(self.aggregator, FedAdam):
+                strategy_config["lr"] = self.aggregator.lr
+                strategy_config["beta1"] = self.aggregator.beta1
+                strategy_config["beta2"] = self.aggregator.beta2
+                strategy_config["epsilon"] = self.aggregator.epsilon
+            elif isinstance(self.aggregator, FedFV):
+                strategy_config["num_clients"] = self.aggregator.num_clients
+                strategy_config["alpha"] = self.aggregator.alpha
+                strategy_config["tau"] = self.aggregator.tau
+                
+            # Map client uploads for Celery payload
+            uploads_payload = []
+            for u in uploads:
+                cid = u["client_id"]
+                uploads_payload.append({
+                    "client_id": cid,
+                    "numeric_id": client_id_map.get(cid, 0),
+                    "s3_key": u["s3_key"],
+                    "samples": u["samples"],
+                    "loss": u["loss"],
+                    "comp_latency": u["comp_latency"],
+                    "measured_energy": u["measured_energy"],
+                    "download_latency": u.get("download_latency", 0.0)
+                })
+                
+            print("Dispatching Celery aggregation task...")
+            task = aggregate_models_task.delay(
+                strategy_name=self.aggregator.__class__.__name__,
+                strategy_config=strategy_config,
+                client_uploads=uploads_payload,
+                current_round=current_round + 1,
+                s3_bucket=bucket
+            )
+            
+            # Poll Celery status
+            while not task.ready():
+                await asyncio.sleep(0.5)
+                
+            celery_res = task.result
+            if celery_res.get("status") != "success":
+                print(f"[ERROR] Celery aggregation failed: {celery_res}")
+                await asyncio.sleep(5)
+                continue
+                
+            # If gradients-based, broadcast final aggregated gradients back to clients
+            if self.aggregator.mode == "gradients":
+                global_gt = celery_res["global_gradients"]
+                for cid in selected_ids:
+                    payload = {
+                        "command": "apply_gradients",
+                        "global_gradients": global_gt
+                    }
+                    await redis_async.publish(f"client:ws:{cid}", json.dumps(payload))
+                    
+            # Increment round numbers
+            current_round += 1
+            rounds_left -= 1
+            await redis_async.set("fl:current_round", str(current_round))
+            await redis_async.set("fl:rounds_left", str(rounds_left))
+            
+            # Log S3 weights/gradients uploads locally and cache values in Redis
+            for u in uploads:
+                cid = u["client_id"]
+                log_upload(cid, u["s3_key"], u["samples"], current_round)
+                await redis_async.hset("fl:client_samples", cid, str(u["samples"]))
+                await redis_async.hset("fl:client_losses", cid, str(u["loss"]))
+                await redis_async.hset("fl:client_latency", cid, str(u["comp_latency"]))
+                await redis_async.hset("fl:client_energy", cid, str(u["measured_energy"]))
+                
+            # 4. Standard Evaluation Flow (Kept Uniform)
+            print("Starting evaluation phase...")
+            await redis_async.delete(f"fl:round:{current_round}:evals")
+            
+            new_global_key = f"models/global/global_model_{current_round}.keras"
+            eval_download_url = generate_presigned_download_url(new_global_key)
+            
+            # Broadcast eval commands
+            all_active = list(await redis_async.smembers("fl:active_clients"))
+            for cid in all_active:
+                payload = {
+                    "command": "eval",
+                    "download_url": eval_download_url
                 }
-                next_state = self.selector._build_state(client_ids, next_context)
-                self.selector.agent.update(
-                    self.selector.last_state, 
-                    self.selector.last_action, 
-                    reward, 
-                    next_state,
-                    context=next_context
-                )
-
+                await redis_async.publish(f"client:ws:{cid}", json.dumps(payload))
+                
+            # Gather evaluation results
+            start_eval = time.time()
+            while True:
+                evals_raw = await redis_async.lrange(f"fl:round:{current_round}:evals", 0, -1)
+                evals = [json.loads(ev) for ev in evals_raw]
+                evaluated_ids = {ev["client_id"] for ev in evals}
+                
+                current_active = await redis_async.smembers("fl:active_clients")
+                if len(evaluated_ids) >= len(current_active):
+                    break
+                    
+                elapsed_eval = time.time() - start_eval
+                if elapsed_eval > 120:
+                    print("Evaluation phase timed out. Processing partial metrics...")
+                    break
+                await asyncio.sleep(1)
+                
+            if evals:
+                total_samples = sum(ev["samples"] for ev in evals)
+                metric_names = evals[0]["metrics"].keys()
+                round_metrics = {}
+                for metric in metric_names:
+                    weighted_metric = 0.0
+                    for ev in evals:
+                        weighted_metric += (ev["metrics"][metric] * (ev["samples"] / total_samples))
+                    round_metrics[metric] = weighted_metric
+                round_metrics["round"] = current_round
+                
+                # Fetch system metrics
+                total_latencies = [u["comp_latency"] for u in uploads]
+                total_energies = [u["measured_energy"] for u in uploads]
+                total_dl_latencies = [u.get("download_latency", 0.0) for u in uploads]
+                
+                round_metrics["avg_comp_latency"] = np.mean(total_latencies) if total_latencies else 0.0
+                round_metrics["max_comp_latency"] = np.max(total_latencies) if total_latencies else 0.0
+                round_metrics["avg_energy_consumed"] = np.mean(total_energies) if total_energies else 0.0
+                round_metrics["total_round_energy"] = np.sum(total_energies) if total_energies else 0.0
+                round_metrics["avg_download_latency"] = np.mean(total_dl_latencies) if total_dl_latencies else 0.0
+                
+                round_history.append(round_metrics)
+                await redis_async.set("fl:round_history", json.dumps(round_history))
+                
+                with open("global_metrics.txt", "a") as f:
+                    f.write(str(round_metrics) + "\n")
+                    
+                # Plot and upload to S3
+                plot_metrics_local(round_history)
+                for plot_file in ["loss_vs_round.png", "accuracy_vs_round.png", "f1_vs_round.png", "system_resources_vs_round.png"]:
+                    if os.path.exists(plot_file):
+                        upload_file(plot_file, f"plots/{plot_file}")
+                        
+            # --- RL Training Step ---
             if round_history:
-                latest_metrics = round_history[-1]
-                metrics_payload = json.dumps(latest_metrics)
-                metrics_send_tasks = []
-                for client_id, ws in self.clients.items():
-                    metrics_send_tasks.append(ws.send_text("metrics"))
-                await asyncio.gather(*metrics_send_tasks)
-
-                metrics_data_tasks = []
-                for client_id, ws in self.clients.items():
-                    metrics_data_tasks.append(ws.send_text(metrics_payload))
-                await asyncio.gather(*metrics_data_tasks)
+                current_loss = round_history[-1]["total_loss"]
+                prev_loss = round_history[-2]["total_loss"] if len(round_history) > 1 else current_loss
+                global_loss_delta = prev_loss - current_loss
+                
+                selected_metrics = {}
+                for cid in selected_ids:
+                    num_id = client_id_map.get(cid, 0)
+                    samples = client_samples.get(cid, 1000)
+                    measured_rt = roundtrips.get(cid, None)
+                    actual_comp_lat = float(await redis_async.hget("fl:client_latency", cid) or 1.0)
+                    actual_meas_energy = float(await redis_async.hget("fl:client_energy", cid) or 5.0)
+                    selected_metrics[num_id] = self.env.compute_client_cost(
+                        num_id, samples, actual_comp_lat, actual_meas_energy, measured_rt
+                    )
+                    
+                local_losses = [client_losses.get(cid, 1.0) for cid in selected_ids]
+                reward = self.env.calculate_reward(selected_metrics, global_loss_delta, local_losses)
+                print(f"[RL Environment] Round {current_round} Stats:")
+                print(f"  - Delta Global Loss: {global_loss_delta:.4f}")
+                print(f"  - Calculated Reward: {reward:.4f}")
+                
+                if isinstance(self.selector, RLClientSelector):
+                    next_context = {
+                        "round": current_round,
+                        "rounds_left": rounds_left,
+                        "env": self.env,
+                        "client_id_map": client_id_map,
+                        "client_samples": client_samples,
+                        "client_losses": client_losses
+                    }
+                    next_state = self.selector._build_state(active_clients, next_context)
+                    self.selector.agent.update(
+                        self.selector.last_state,
+                        self.selector.last_action,
+                        reward,
+                        next_state,
+                        context=next_context
+                    )
+                    # Persist agent Q-table to Redis
+                    await redis_async.set("fl:rl:q_table", json.dumps({k: v.tolist() for k, v in self.selector.agent.q_table.items()}))
+                    
+                # Broadcast latest metrics to active clients
+                metrics_payload = json.dumps(round_history[-1])
+                for cid in all_active:
+                    await redis_async.publish(f"client:ws:{cid}", json.dumps({
+                        "command": "metrics",
+                        "payload": metrics_payload
+                    }))
 
         print("Federated learning rounds completed.")
-
-        exit_tasks = []
-        for client_id, ws in self.clients.items():
-            exit_tasks.append(ws.send_text("exit"))
-        await asyncio.gather(*exit_tasks)
+        # Exit instruction
+        all_active = list(await redis_async.smembers("fl:active_clients"))
+        for cid in all_active:
+            await redis_async.publish(f"client:ws:{cid}", json.dumps({"command": "exit"}))
+            
+        await redis_async.set("fl:is_running", "false")
         self.is_running = False
 
-    async def receive_raw_gradients(self, client_id, ws: WebSocket):
-        global client_id_map
-        try:
-            json_data = await ws.receive_text()
-            data = json.loads(json_data)
-            client_grads = [np.array(g) for g in data["gradients"]]
-            print(f"[SERVER] Successfully received raw gradients from client {client_id}")
-            
-            comp_latency = float(data["comp_latency"])
-            measured_energy = float(data["measured_energy"])
-            
-            # Update dynamic metrics DB
-            self.client_samples_db[client_id] = float(data["samples"])
-            self.client_losses_db[client_id] = float(data["loss"])
-            self.client_latency_db[client_id] = comp_latency
-            self.client_energy_db[client_id] = measured_energy
-            
-            return (client_grads, float(data["samples"]), float(data["loss"]), client_id_map[client_id], comp_latency, measured_energy)
-        except Exception as e:
-            print(f"Error reading raw gradients from {client_id}: {e}")
-            return None
 
-    async def receive_model(self, client_id, ws: WebSocket):
-        global current_round
-        try:
-            msg = await ws.receive_text()
-            if msg == "FILE":
-                samples_str = await ws.receive_text()
-                samples = float(samples_str)
-
-                #added
-                loss_str = await ws.receive_text()
-                loss = float(loss_str)
-
-                comp_latency_str = await ws.receive_text()
-                comp_latency = float(comp_latency_str)
-                
-                measured_energy_str = await ws.receive_text()
-                measured_energy = float(measured_energy_str)
-                client_download_latency = float(await ws.receive_text())
-                
-                # Update dynamic metrics DB
-                self.client_samples_db[client_id] = samples
-                self.client_losses_db[client_id] = loss
-                self.client_latency_db[client_id] = comp_latency
-                self.client_energy_db[client_id] = measured_energy
-                
-                file_bytes = await ws.receive_bytes()
-                file_path = f"models/client_{client_id}_model_{current_round + 1}.keras"
-                with open(file_path, "wb") as f:
-                    f.write(file_bytes)
-
-                done_msg = await ws.receive_text()
-                if done_msg == "done":
-                    log_upload(client_id, file_path, samples)
-                    return (file_path, samples, loss, client_id, comp_latency, measured_energy, client_download_latency)
-        except Exception as e:
-            print(f"Error receiving from {client_id}: {e}")
-        return None
-
-    async def receive_eval(self, client_id, ws: WebSocket):
-        global client_metrics
-        try:
-            msg = await ws.receive_text()
-            if msg == "EVAL":
-                samples_str = await ws.receive_text()
-                samples = float(samples_str)
-                metrics_str = await ws.receive_text()
-                local_metrics = json.loads(metrics_str)
-                client_metrics.append((local_metrics, samples))
-                
-                # Update dynamic metrics DB
-                self.client_samples_db[client_id] = samples
-                self.client_losses_db[client_id] = local_metrics.get("total_loss", 1.0)
-        except Exception as e:
-            print(f"Error receiving eval from {client_id}: {e}")
-
-    def agg(self):
-        global rounds_left, current_round
-        print('starting aggregation')
-        if len(self.client_uploads) > 0:
-            current_round += 1
-            self.aggregator.aggregate(self.client_uploads, f"models/global_model_{current_round}.keras",current_round)
-            for file_path, *_, _, _ in self.client_uploads:
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-            
-            print(f"Round {current_round} complete.")
-            rounds_left -= 1
-        self.client_uploads.clear()
-
-
+# Create singleton manager
 manager = FederatedServer()
 
 @app.websocket("/ws/{client_id}")
 async def websocket_endpoint(websocket: WebSocket, client_id: str):
-    global clients,manager,N
-    if client_id not in clients or client_id not in manager.authenticated_clients:
+    # Verify auth session
+    is_authenticated = await redis_async.exists(f"fl:auth:{client_id}")
+    if not is_authenticated:
         await websocket.close(code=1008)
         return
+        
     await websocket.accept()
-    await manager.connect(client_id, websocket)
-    if len(manager.clients) >= N and not manager.is_running:
-        manager.is_running = True
-        asyncio.create_task(manager.start())
+    await redis_async.sadd("fl:active_clients", client_id)
+    
     try:
-        while True:
-            await asyncio.sleep(3600)
-
-    except WebSocketDisconnect:
-        manager.disconnect(client_id)
-        print(f"Client #{client_id} left the chat")
+        # Client sends "ready" handshake
+        msg = await websocket.receive_text()
+        if msg != "ready":
+            print(f"Unexpected handshake from {client_id}: {msg}")
+            await websocket.close()
+            return
+    except Exception as e:
+        print(f"Error checking handshake for {client_id}: {e}")
+        await redis_async.srem("fl:active_clients", client_id)
+        return
+        
+    # Check client start count
+    active_count = await redis_async.scard("fl:active_clients")
+    is_running = await redis_async.get("fl:is_running") == "true"
+    
+    if active_count >= N and not is_running:
+        # Acquire coordinator lock
+        lock = redis_async.lock("fl:coordinator_lock", timeout=3600)
+        if await lock.acquire(blocking=False):
+            await redis_async.set("fl:is_running", "true")
+            manager.is_running = True
+            print("Required client count met. Launching FL Coordinator task...")
+            asyncio.create_task(manager.start())
+            
+    # Bridge Redis Pub/Sub to Client WebSocket
+    pubsub = redis_async.pubsub()
+    await pubsub.subscribe(f"client:ws:{client_id}")
+    
+    async def redis_to_ws():
+        try:
+            async for message in pubsub.listen():
+                if message["type"] == "message":
+                    await websocket.send_text(message["data"])
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            print(f"Error in Redis-to-WS bridge for client {client_id}: {e}")
+            
+    async def ws_to_redis():
+        try:
+            while True:
+                msg_text = await websocket.receive_text()
+                data = json.loads(msg_text)
+                
+                status = data.get("status")
+                current_round_val = int(await redis_async.get("fl:current_round") or "0")
+                
+                if status == "done":
+                    # Client uploaded trained weights/gradients to S3
+                    # Append result parameters to Redis List
+                    await redis_async.rpush(f"fl:round:{current_round_val}:uploads", json.dumps({
+                        "client_id": client_id,
+                        "s3_key": data["s3_key"],
+                        "samples": float(data["samples"]),
+                        "loss": float(data["loss"]),
+                        "comp_latency": float(data["comp_latency"]),
+                        "measured_energy": float(data["measured_energy"]),
+                        "download_latency": float(data["download_latency"])
+                    }))
+                    print(f"[WebSocket Bridge] Upload registration logged for client {client_id}.")
+                    
+                elif status == "evaluated":
+                    # Client completed local evaluation metrics
+                    await redis_async.rpush(f"fl:round:{current_round_val}:evals", json.dumps({
+                        "client_id": client_id,
+                        "samples": float(data["samples"]),
+                        "metrics": data["metrics"]
+                    }))
+                    print(f"[WebSocket Bridge] Evaluation registration logged for client {client_id}.")
+                    
+        except WebSocketDisconnect:
+            print(f"Client #{client_id} connection disconnected.")
+        except Exception as e:
+            print(f"Error in WS-to-Redis loop for client {client_id}: {e}")
+        finally:
+            await redis_async.srem("fl:active_clients", client_id)
+            await pubsub.unsubscribe(f"client:ws:{client_id}")
+            
+    # Launch concurrent WS loops
+    ws_task = asyncio.create_task(ws_to_redis())
+    redis_task = asyncio.create_task(redis_to_ws())
+    
+    try:
+        await asyncio.gather(ws_task, redis_task)
+    except Exception:
+        pass
+    finally:
+        ws_task.cancel()
+        redis_task.cancel()
+        await redis_async.srem("fl:active_clients", client_id)
