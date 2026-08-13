@@ -403,7 +403,7 @@ class FederatedServer:
                 continue
                 
             elapsed_round = time.time() - start_wait
-            roundtrips = {cid: elapsed_round for cid in selected_ids}
+            print(f"Round training phase completed in {elapsed_round:.4f}s.")
             
             # Prepare configuration config dictionary to pass to Celery
             strategy_config = {}
@@ -569,7 +569,7 @@ class FederatedServer:
                     num_id = client_id_map.get(cid, 0)
                     samples = client_samples.get(cid, 1000)
                     individual_rt_raw = await redis_async.hget("fl:client_roundtrip", cid)
-                    measured_rt = float(individual_rt_raw) if individual_rt_raw else roundtrips.get(cid, None)
+                    measured_rt = float(individual_rt_raw) if individual_rt_raw else elapsed_round
                     actual_comp_lat = float(await redis_async.hget("fl:client_latency", cid) or 1.0)
                     actual_meas_energy = float(await redis_async.hget("fl:client_energy", cid) or 5.0)
                     selected_metrics[num_id] = self.env.compute_client_cost(
