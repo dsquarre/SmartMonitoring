@@ -85,19 +85,35 @@ async def startup_event():
 
     # Verify initial global model exists in S3, if not build and upload
     bucket = get_bucket_name()
-    s3_client = boto3.client("s3")
-    try:
-        s3_client.head_object(Bucket=bucket, Key="models/global/global_model_0.keras")
+    from s3_helper import S3_MOCK, MOCK_S3_DIR
+    global_model_exists = False
+    
+    if S3_MOCK:
+        mock_path = os.path.join(MOCK_S3_DIR, "models/global/global_model_0.keras")
+        global_model_exists = os.path.exists(mock_path)
+    else:
+        s3_client = boto3.client("s3")
+        try:
+            s3_client.head_object(Bucket=bucket, Key="models/global/global_model_0.keras")
+            global_model_exists = True
+        except Exception:
+            global_model_exists = False
+
+    if global_model_exists:
         print("Found initial global model in S3.")
-    except Exception:
+    else:
         print("Initial global model not found in S3. Creating and uploading...")
         os.makedirs("models", exist_ok=True)
         model = Model()
         model_path = "models/global_model_0.keras"
         model.model.save(model_path)
         upload_file(model_path, "models/global/global_model_0.keras")
-        os.remove(model_path)
-        os.rmdir("models")
+        if os.path.exists(model_path):
+            os.remove(model_path)
+        try:
+            os.rmdir("models")
+        except Exception:
+            pass
 
 if not os.path.exists('upload_log.csv'):
     with open('upload_log.csv', 'w', newline='') as f:
