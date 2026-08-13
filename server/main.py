@@ -10,8 +10,6 @@ from model import Model
 from collections import deque
 import random
 import numpy as np
-import bcrypt
-import shutil
 import time
 from selector import RandomClientSelector, RLClientSelector, RandomRLAgent, QLearningAgent
 from aggregator import FedAvg, FedFV, qFedAvg, FedAdam
@@ -371,6 +369,8 @@ class FederatedServer:
                     payload = {"command": "wait"}
                     
                 await redis_async.publish(f"client:ws:{cid}", json.dumps(payload))
+                if cid in selected_set:
+                    await redis_async.hset("fl:client_start_time", cid, str(time.time()))
                 
             # Wait for selected client uploads with timeout + disconnect recovery
             start_wait = time.time()
@@ -381,6 +381,7 @@ class FederatedServer:
                     uploaded_ids = {u["client_id"] for u in uploads}
                     
                     if len(uploaded_ids) >= len(selected_ids):
+                        print('all clients uploaded')
                         break
                         
                     elapsed = time.time() - start_wait
@@ -567,7 +568,8 @@ class FederatedServer:
                 for cid in selected_ids:
                     num_id = client_id_map.get(cid, 0)
                     samples = client_samples.get(cid, 1000)
-                    measured_rt = roundtrips.get(cid, None)
+                    individual_rt_raw = await redis_async.hget("fl:client_roundtrip", cid)
+                    measured_rt = float(individual_rt_raw) if individual_rt_raw else roundtrips.get(cid, None)
                     actual_comp_lat = float(await redis_async.hget("fl:client_latency", cid) or 1.0)
                     actual_meas_energy = float(await redis_async.hget("fl:client_energy", cid) or 5.0)
                     selected_metrics[num_id] = self.env.compute_client_cost(
@@ -693,6 +695,13 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
                         "download_latency": float(data["download_latency"])
                     }))
                     print(f"[WebSocket Bridge] Upload registration logged for client {client_id}.")
+                    
+                    # Calculate and save individual round-trip latency
+                    start_time_raw = await redis_async.hget("fl:client_start_time", client_id)
+                    if start_time_raw:
+                        individual_rt = time.time() - float(start_time_raw)
+                        await redis_async.hset("fl:client_roundtrip", client_id, str(individual_rt))
+                        print(f"[WebSocket Bridge] Individual roundtrip for {client_id}: {individual_rt:.4f}s")
                     
                 elif status == "evaluated":
                     # Client completed local evaluation metrics
