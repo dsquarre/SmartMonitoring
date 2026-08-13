@@ -12,3 +12,6 @@ __pycache__
 *.rdb
 tmp_s3_bucket/
 server/tmp_round_*/
+certs/
+*.key
+*.crt
