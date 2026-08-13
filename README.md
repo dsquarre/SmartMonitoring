@@ -53,9 +53,16 @@ Add the client ID and hash to [server/credentials.json](file:///home/danish/Smar
 ```
 
 ### 2. Start the Client Node
-Start the client with the matching client ID and password:
+Start the client with the same client ID and password:
 ```bash
-python client/main.py -d /path/to/dataset.npz -s <server_ip_or_url> -p <password> -c client_11
+for i in $(seq 0 99); do
+  docker run -d \
+    --name "client_$i" \
+    -e CLIENT_ID="client_$i" \
+    -e SERVER_IP="10.0.0.1:8000" \
+    -e PASSWORD="P7h1!quiBO0no96" \
+    smartmonitoring-client:latest -d /data/dataset_$i.npz
+done
 ```
 
 ---
