@@ -7,10 +7,12 @@ from s3_helper import download_file, upload_file
 
 # Initialize Celery app
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+backend_url = f"{REDIS_URL}?protocol=2" if "?" not in REDIS_URL else f"{REDIS_URL}&protocol=2"
+
 celery_app = Celery(
     "fl_tasks",
     broker=REDIS_URL,
-    backend=REDIS_URL
+    backend=backend_url
 )
 
 celery_app.conf.update(
@@ -20,7 +22,6 @@ celery_app.conf.update(
     timezone="UTC",
     enable_utc=True,
     broker_transport_options={"protocol": 2},
-    result_backend_transport_options={"protocol": 2},
 )
 
 # Helper function to load gradients from .npz
