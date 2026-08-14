@@ -15,3 +15,4 @@ server/tmp_round_*/
 certs/
 *.key
 *.crt
+fl.yaml
