@@ -43,7 +43,7 @@ def test_s3_presigned_urls():
     print(f"Generated download presigned URL: {download_url[:60]}...")
     
     # Test PUT URL generation
-    upload_url = generate_presigned_upload_url("models/client/client_test_model.keras")
+    upload_url = generate_presigned_upload_url("models/round_1/client_test_model.keras")
     assert upload_url is not None
     assert "s3" in upload_url.lower()
     assert "client_test_model.keras" in upload_url

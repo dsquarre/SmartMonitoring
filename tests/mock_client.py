@@ -13,14 +13,24 @@ server_url = "http://127.0.0.1:8000"
 ws_url = "ws://127.0.0.1:8000/ws/"
 password = "P7h1!quiBO0no96"
 
+from urllib.parse import urlparse, parse_qs
+
 def extract_s3_key(url: str) -> str:
-    if "key=" in url:
-        return url.split("key=")[1].split("&")[0]
-    path = url.split("?")[0]
-    parts = path.split(".amazonaws.com/")
-    if len(parts) > 1:
-        return parts[1]
-    return path.split("/")[-1]
+    """
+    Extracts the exact S3 object key from a presigned S3 URL or mock S3 URL.
+    """
+    parsed = urlparse(url)
+    query_params = parse_qs(parsed.query)
+    if "key" in query_params:
+        return query_params["key"][0]
+    
+    if ".amazonaws.com/" in url:
+        parts = url.split("?")[0].split(".amazonaws.com/")
+        if len(parts) > 1:
+            return parts[1]
+            
+    return parsed.path.lstrip("/")
+
 
 class MockClient:
     def __init__(self, client_id):
@@ -75,6 +85,7 @@ async def run_mock_client(client_id):
                     # 1. Simulate download from S3
                     dl_start = time.perf_counter()
                     resp = requests.get(download_url)
+                    resp.raise_for_status()
                     dl_latency = time.perf_counter() - dl_start
                     print(f"[{client_id}] Mock-downloaded global weights (size: {len(resp.content)} bytes) in {dl_latency:.4f}s")
                     
@@ -85,6 +96,7 @@ async def run_mock_client(client_id):
                     # 3. Simulate S3 upload
                     up_start = time.perf_counter()
                     up_res = requests.put(upload_url, data=resp.content)
+                    up_res.raise_for_status()
                     up_latency = time.perf_counter() - up_start
                     print(f"[{client_id}] Mock-uploaded weights. HTTP Status: {up_res.status_code} in {up_latency:.4f}s")
                     
@@ -109,6 +121,7 @@ async def run_mock_client(client_id):
                     # 1. Simulate download
                     dl_start = time.perf_counter()
                     resp = requests.get(download_url)
+                    resp.raise_for_status()
                     dl_latency = time.perf_counter() - dl_start
                     
                     # 2. Simulate local gradients extraction
@@ -135,6 +148,7 @@ async def run_mock_client(client_id):
                             
                         up_start = time.perf_counter()
                         up_res = requests.put(upload_url, data=npz_bytes)
+                        up_res.raise_for_status()
                         up_latency = time.perf_counter() - up_start
                         print(f"[{client_id}] Mock-uploaded gradients. HTTP Status: {up_res.status_code}")
                         
@@ -171,7 +185,8 @@ async def run_mock_client(client_id):
                     download_url = event["download_url"]
                     
                     # Simulate download
-                    requests.get(download_url)
+                    eval_resp = requests.get(download_url)
+                    eval_resp.raise_for_status()
                     
                     # Simulate evaluation
                     local_metrics = {
