@@ -124,17 +124,24 @@ def detect_device_specs():
     }
 
 
+from urllib.parse import urlparse, parse_qs
+
 def extract_s3_key(url: str) -> str:
     """
-    Extracts the S3 object key from a presigned S3 URL.
+    Extracts the exact S3 object key from a presigned S3 URL or mock S3 URL.
     """
-    # Remove query params
-    path = url.split("?")[0]
-    # S3 virtual host url format: https://<bucket>.s3.<region>.amazonaws.com/<key>
-    parts = path.split(".amazonaws.com/")
-    if len(parts) > 1:
-        return parts[1]
-    return path.split("/")[-1]
+    parsed = urlparse(url)
+    query_params = parse_qs(parsed.query)
+    if "key" in query_params:
+        return query_params["key"][0]
+    
+    if ".amazonaws.com/" in url:
+        parts = url.split("?")[0].split(".amazonaws.com/")
+        if len(parts) > 1:
+            return parts[1]
+            
+    return parsed.path.lstrip("/")
+
 
 
 class Client:
@@ -278,6 +285,7 @@ async def simulate(client):
                     # 1. Download global model weights from S3
                     download_start = time.perf_counter()
                     response = requests.get(download_url)
+                    response.raise_for_status()
                     download_latency = time.perf_counter() - download_start
                     
                     model_path = f"models/global_model_{client.client_id}.keras"
@@ -314,6 +322,7 @@ async def simulate(client):
                     upload_start = time.perf_counter()
                     with open(client_model_path, "rb") as f:
                         upload_resp = requests.put(upload_url, data=f)
+                    upload_resp.raise_for_status()
                     upload_latency = time.perf_counter() - upload_start
                     
                     print(f"Upload status: {upload_resp.status_code} | Download: {download_latency:.4f}s | Upload: {upload_latency:.4f}s")
@@ -339,6 +348,7 @@ async def simulate(client):
                     # 1. Download global model weights from S3
                     download_start = time.perf_counter()
                     response = requests.get(download_url)
+                    response.raise_for_status()
                     download_latency = time.perf_counter() - download_start
                     
                     model_path = f"models/global_model_{client.client_id}.keras"
@@ -371,6 +381,7 @@ async def simulate(client):
                     upload_start = time.perf_counter()
                     with open(local_npz_path, "rb") as f:
                         upload_resp = requests.put(upload_url, data=f)
+                    upload_resp.raise_for_status()
                     upload_latency = time.perf_counter() - upload_start
                     
                     print(f"Gradients upload status: {upload_resp.status_code} | Comp: {comp_latency:.4f}s")
@@ -404,6 +415,7 @@ async def simulate(client):
                     
                     # Download global model weights from S3
                     response = requests.get(download_url)
+                    response.raise_for_status()
                     model_path = f"models/global_model_{client.client_id}.keras"
                     with open(model_path, "wb") as f:
                         f.write(response.content)
