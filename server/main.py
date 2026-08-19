@@ -363,10 +363,11 @@ class FederatedServer:
             for cid in active_clients:
                 if cid in selected_set:
                     # Generate presigned PUT URL for local weights upload
+                    cid_name = cid if cid.startswith("client_") else f"client_{cid}"
                     if mode_command == "train_fv":
-                        client_upload_key = f"models/client/client_{cid}_round_{current_round + 1}_gradients.npz"
+                        client_upload_key = f"models/round_{current_round + 1}/{cid_name}_gradients.npz"
                     else:
-                        client_upload_key = f"models/client/client_{cid}_round_{current_round + 1}.keras"
+                        client_upload_key = f"models/round_{current_round + 1}/{cid_name}.keras"
                         
                     upload_url = generate_presigned_upload_url(client_upload_key)
                     payload = {
