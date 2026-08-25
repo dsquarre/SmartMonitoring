@@ -193,9 +193,10 @@ class LinUCBAgent(BaseRLAgent):
         for idx in active_indices:
             x_i = state[idx].reshape(-1, 1)  # (feature_dim, 1)
             # LinUCB score = theta^T * x + alpha * sqrt(x^T * A_inv * x)
-            expected_reward = float(theta.T @ x_i)
-            uncertainty = float(np.sqrt(x_i.T @ self.A_inv @ x_i))
+            expected_reward = float((theta.T @ x_i).item())
+            uncertainty = float(np.sqrt((x_i.T @ self.A_inv @ x_i).item()))
             scores[idx] = expected_reward + self.alpha * uncertainty
+
 
         # Pick top k indices with highest scores among active clients (Action Masking)
         selected_indices = np.argsort(scores)[::-1][:k].tolist()
