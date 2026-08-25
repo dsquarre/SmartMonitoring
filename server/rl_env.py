@@ -51,3 +51,32 @@ class FederatedEnv:
         # Multi-objective Reward formulation
         reward = (w_perf * global_loss_delta) - (w_local * avg_local_loss) - (w_lat * max_latency) - (w_eng * total_energy) - (w_fair * loss_variance)
         return reward
+
+    def calculate_vector_rewards(self, client_ids, selected_ids, selected_metrics, global_loss_delta, 
+                                 client_losses, staleness_dict=None,
+                                 w_perf=10.0, w_local=1.0, w_lat=0.1, w_eng=1.0, w_stale=0.05):
+        """
+        Calculates per-client individual reward vector and global composite reward scalar.
+        
+        Returns:
+            client_rewards: Dict[str, float] mapping client_id -> individual reward.
+            scalar_reward: float total reward scalar.
+        """
+        staleness_dict = staleness_dict or {}
+        client_rewards = {}
+        
+        for cid in client_ids:
+            if cid in selected_ids and cid in selected_metrics:
+                m = selected_metrics[cid]
+                c_loss = client_losses.get(cid, 1.0)
+                # Selected client reward: positive gain from global convergence minus local loss and costs
+                r_i = (w_perf * global_loss_delta) - (w_local * c_loss) - (w_lat * m.get("t_total", 0.0)) - (w_eng * m.get("E_total", 0.0))
+            else:
+                # Unselected client: penalty proportional to staleness to discourage starvation
+                stale_rounds = staleness_dict.get(cid, 0)
+                r_i = - (w_stale * stale_rounds)
+            client_rewards[cid] = float(r_i)
+
+        scalar_reward = sum(client_rewards.values())
+        return client_rewards, scalar_reward
+
