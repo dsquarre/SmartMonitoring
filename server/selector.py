@@ -363,3 +363,218 @@ class RLClientSelector(ClientSelector):
         update_context["vector_rewards"] = vector_rewards
         
         self.agent.update(self.last_state, self.last_action, reward, next_state, context=update_context)
+
+class MetaAggregatorAgent:
+    """
+    Level 1 Meta-Controller Agent for selecting the aggregation strategy.
+    Strategies: ["FedAvg", "qFedAvg", "FedFV", "FedAdam", "FedProx", "Krum", "SCAFFOLD"]
+    Input State S^(1) in R^5: [round_progress, global_loss_delta, loss_variance, avg_system_latency, poison_alert_flag]
+    """
+    STRATEGIES = ["FedAvg", "qFedAvg", "FedFV", "FedAdam", "FedProx", "Krum", "SCAFFOLD"]
+
+    def __init__(self, alpha: float = 0.5, feature_dim: int = 5):
+        self.alpha = alpha
+        self.feature_dim = feature_dim
+        self.num_actions = len(self.STRATEGIES)
+        self.A = [np.eye(feature_dim, dtype=np.float64) for _ in range(self.num_actions)]
+        self.b = [np.zeros((feature_dim, 1), dtype=np.float64) for _ in range(self.num_actions)]
+        self.last_action_idx = 0
+
+    def select_strategy(self, global_state: np.ndarray) -> Tuple[int, str]:
+        x = global_state.reshape(-1, 1)
+        scores = np.zeros(self.num_actions, dtype=np.float64)
+        
+        for k in range(self.num_actions):
+            A_inv = np.linalg.inv(self.A[k])
+            theta_k = A_inv @ self.b[k]
+            exp_reward = float((theta_k.T @ x).item())
+            uncert = float(np.sqrt((x.T @ A_inv @ x).item()))
+            scores[k] = exp_reward + self.alpha * uncert
+
+        best_idx = int(np.argmax(scores))
+        self.last_action_idx = best_idx
+        strategy_name = self.STRATEGIES[best_idx]
+        print(f"[Meta-Controller] Selected Aggregation Strategy: {strategy_name} (index {best_idx})")
+        return best_idx, strategy_name
+
+    def update(self, global_state: np.ndarray, action_idx: int, reward: float):
+        x = global_state.reshape(-1, 1)
+        self.A[action_idx] += x @ x.T
+        self.b[action_idx] += reward * x
+        print(f"[Meta-Controller] Updated weights for strategy '{self.STRATEGIES[action_idx]}'.")
+
+class HierarchicalFLSelector(ClientSelector):
+    """
+    2-Level Hierarchical RL Selector:
+    Level 1: MetaAggregatorAgent selects 1 of 7 Aggregation Strategies.
+    Level 2: LinUCBAgent selects Top-K Clients conditioned on chosen Aggregation Strategy.
+    """
+    def __init__(self, meta_agent: MetaAggregatorAgent, sub_agent: LinUCBAgent, env: Any):
+        self.meta_agent = meta_agent
+        self.sub_agent = sub_agent
+        self.env = env
+        
+        self.last_global_state = None
+        self.last_agg_idx = 0
+        self.last_chosen_agg = "FedAvg"
+        self.last_client_state = None
+        self.last_action = None
+        self.last_client_ids = []
+
+        self.client_staleness: Dict[str, int] = {}
+        self.client_ema_latency: Dict[str, float] = {}
+        self.client_ema_energy: Dict[str, float] = {}
+        self.client_has_telemetry: Dict[str, float] = {}
+
+    def select_clients(self, client_ids: List[str], k: int, context: Dict[str, Any] = None) -> List[str]:
+        if not client_ids:
+            return []
+        
+        context = context or {}
+        active_clients = context.get("active_clients", client_ids)
+        active_indices = [i for i, cid in enumerate(client_ids) if cid in active_clients]
+        
+        # Step 1: Level 1 Meta-Controller selects Aggregation Strategy
+        global_state = self._build_global_state(context)
+        self.last_global_state = global_state
+        agg_idx, chosen_agg = self.meta_agent.select_strategy(global_state)
+        self.last_agg_idx = agg_idx
+        self.last_chosen_agg = chosen_agg
+        context["chosen_aggregation"] = chosen_agg
+
+        # Step 2: Level 2 Sub-Controller selects Top-K Clients conditioned on chosen_agg
+        context["active_indices"] = active_indices
+        context["env"] = self.env
+        
+        client_state = self._build_conditioned_client_state(client_ids, agg_idx, context)
+        self.last_client_state = client_state
+        self.last_client_ids = client_ids
+
+        selected_indices = self.sub_agent.get_action(client_state, len(client_ids), k, context=context)
+        self.last_action = selected_indices
+
+        # Update staleness counters
+        selected_ids = [client_ids[idx] for idx in selected_indices]
+        for cid in client_ids:
+            if cid in selected_ids:
+                self.client_staleness[cid] = 0
+            else:
+                self.client_staleness[cid] = self.client_staleness.get(cid, 0) + 1
+
+        return selected_ids
+
+    def _build_global_state(self, context: Dict[str, Any]) -> np.ndarray:
+        current_r = context.get("round", 1)
+        total_r = max(1, current_r + context.get("rounds_left", 10))
+        progress = float(current_r / total_r)
+        
+        global_loss_delta = float(context.get("global_loss_delta", 0.0))
+        client_losses = list(context.get("client_losses", {}).values())
+        loss_var = float(np.var(client_losses)) if len(client_losses) > 1 else 0.0
+        
+        avg_lat = float(np.mean(list(self.client_ema_latency.values()))) if self.client_ema_latency else 0.0
+        poison_alert = float(context.get("poison_alert_flag", 0.0))
+        
+        return np.array([progress, global_loss_delta, loss_var, avg_lat, poison_alert], dtype=np.float32)
+
+    def _build_conditioned_client_state(self, client_ids: List[str], agg_idx: int, context: Dict[str, Any]) -> np.ndarray:
+        client_losses = context.get("client_losses", {})
+        avg_loss = np.mean(list(client_losses.values())) if client_losses else 1.0
+        
+        # 7-dimensional one-hot vector for aggregation strategy
+        one_hot_agg = [0.0] * len(MetaAggregatorAgent.STRATEGIES)
+        if 0 <= agg_idx < len(one_hot_agg):
+            one_hot_agg[agg_idx] = 1.0
+
+        state_list = []
+        for i, cid in enumerate(client_ids):
+            num_id = context.get("client_id_map", {}).get(cid, i)
+            profile = self.env.profiles.get(num_id, {"cpu_frequency": 2.0e9})
+            
+            samples = context.get("client_samples", {}).get(cid, 1000) / 1000.0
+            last_loss = float(client_losses.get(cid, 1.0))
+            loss_staleness = float(avg_loss - last_loss)
+            
+            # Telemetry metrics (default to 0.0 if not available per AGENTS.md rule)
+            lat = float(self.client_ema_latency.get(cid, 0.0))
+            eng = float(self.client_ema_energy.get(cid, 0.0))
+            has_telemetry = float(self.client_has_telemetry.get(cid, 0.0))
+            
+            staleness = float(self.client_staleness.get(cid, 0))
+            bias = 1.0
+            
+            # 8 base features + 7 one-hot features = 15 total features
+            row = [
+                last_loss, loss_staleness, lat, eng, has_telemetry, staleness, samples, bias
+            ] + one_hot_agg
+            state_list.append(row)
+            
+        return np.array(state_list, dtype=np.float32)
+
+    def update_policy(self, round_summary: Dict[str, Any]):
+        if self.last_client_state is None or self.last_action is None:
+            return
+
+        selected_ids = round_summary.get("selected_ids", [])
+        client_id_map = round_summary.get("client_id_map", {})
+        client_samples = round_summary.get("client_samples", {})
+        client_losses = round_summary.get("client_losses", {})
+        global_loss_delta = round_summary.get("global_loss_delta", 0.0)
+        local_losses = round_summary.get("local_losses", [])
+        active_clients = round_summary.get("active_clients", self.last_client_ids)
+        roundtrips = round_summary.get("client_roundtrips", {})
+        latencies = round_summary.get("client_latencies", {})
+        energies = round_summary.get("client_energies", {})
+        
+        selected_metrics = {}
+        for cid in selected_ids:
+            num_id = client_id_map.get(cid, 0)
+            samples = client_samples.get(cid, 1000)
+            indiv_rt = roundtrips.get(cid, round_summary.get("elapsed_round"))
+            comp_lat = latencies.get(cid, 1.0)
+            energy = energies.get(cid, 5.0)
+            cost_dict = self.env.compute_client_cost(
+                num_id, samples, comp_lat, energy, indiv_rt
+            )
+            selected_metrics[cid] = cost_dict
+            
+            alpha = 0.3
+            self.client_ema_latency[cid] = (1 - alpha) * self.client_ema_latency.get(cid, 0.0) + alpha * cost_dict["t_total"]
+            self.client_ema_energy[cid] = (1 - alpha) * self.client_ema_energy.get(cid, 0.0) + alpha * cost_dict["E_total"]
+            self.client_has_telemetry[cid] = 1.0
+
+        if hasattr(self.env, "calculate_vector_rewards"):
+            c_rewards, scalar_reward = self.env.calculate_vector_rewards(
+                self.last_client_ids, selected_ids, selected_metrics, 
+                global_loss_delta, client_losses, self.client_staleness
+            )
+            vector_rewards = {i: c_rewards[cid] for i, cid in enumerate(self.last_client_ids) if cid in c_rewards}
+        else:
+            scalar_reward = self.env.calculate_reward(
+                {client_id_map.get(cid, 0): m for cid, m in selected_metrics.items()},
+                global_loss_delta, local_losses
+            )
+            vector_rewards = {}
+
+        print(f"[RL Environment] Round {round_summary.get('round', 1)} Stats:")
+        print(f"  - Chosen Aggregation Strategy: {self.last_chosen_agg}")
+        print(f"  - Delta Global Loss: {global_loss_delta:.4f}")
+        print(f"  - Calculated Reward: {scalar_reward:.4f}")
+
+        # Update Level 1 Meta-Controller Policy
+        if self.last_global_state is not None:
+            self.meta_agent.update(self.last_global_state, self.last_agg_idx, scalar_reward)
+
+        # Update Level 2 Sub-Controller Policy
+        next_context = {
+            "round": round_summary.get("round", 1),
+            "rounds_left": round_summary.get("rounds_left", 0),
+            "client_id_map": client_id_map,
+            "client_samples": client_samples,
+            "client_losses": client_losses,
+            "active_clients": active_clients,
+            "vector_rewards": vector_rewards
+        }
+        next_state = self._build_conditioned_client_state(self.last_client_ids, self.last_agg_idx, next_context)
+        
+        self.sub_agent.update(self.last_client_state, self.last_action, scalar_reward, next_state, context=next_context)
