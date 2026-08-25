@@ -120,14 +120,16 @@ class qFedAvg(ModelAggregator):
         global_model = Model()
         raw_weights = []
 
-        for (model_path, samples, loss, client_id, *_, _) in client_data:
+        for item in client_data:
+            model_path, samples, loss, client_id = item[0], item[1], item[2], item[3]
             raw_weight = (samples *((loss + 1e-10) ** self.q))
             raw_weights.append(raw_weight)
         total_weight = sum(raw_weights)
         aggregated_weights = None
 
         print("Using qFedAvg")
-        for idx, (model_path, samples, loss, client_id, *_, _) in enumerate(client_data):
+        for idx, item in enumerate(client_data):
+            model_path, samples, loss, client_id = item[0], item[1], item[2], item[3]
             client_weight = (raw_weights[idx] / total_weight)
             local_model = Model()
             local_model.model.load_weights(model_path)
@@ -443,7 +445,8 @@ class SCAFFOLD(ModelAggregator):
         aggregated_weights = [np.zeros_like(layer) for layer in global_weights]
         delta_c_sum = [np.zeros_like(layer) for layer in global_weights]
 
-        for model_path, samples, loss, cid, *_, _ in client_data:
+        for item in client_data:
+            model_path, samples, loss, cid = item[0], item[1], item[2], item[3]
             local_model = Model()
             local_model.model.load_weights(model_path)
             local_weights = local_model.model.get_weights()
