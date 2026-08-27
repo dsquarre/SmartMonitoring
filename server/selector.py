@@ -3,6 +3,8 @@ from typing import List, Dict, Any, Tuple
 import random
 import numpy as np
 import itertools
+import tensorflow as tf
+from tensorflow.keras import layers, models, optimizers
 
 class ClientSelector(ABC):
     @abstractmethod
@@ -218,6 +220,92 @@ class LinUCBAgent(BaseRLAgent):
                 self.recompute_inv = True
                 
         print(f"[LinUCB Agent] Updated LinUCB model parameters A and b.")
+
+class DQNAgent(BaseRLAgent):
+    """
+    TensorFlow/Keras Deep Q-Network Agent for client selection.
+    Supports both feature_dim = 8 (Standalone mode) and feature_dim = 15 (Hierarchical mode).
+    """
+    def __init__(self, feature_dim: int = 8, hidden_dim: int = 32, lr: float = 0.001, gamma: float = 0.9, epsilon: float = 0.1):
+        self.feature_dim = feature_dim
+        self.hidden_dim = hidden_dim
+        self.lr = lr
+        self.gamma = gamma
+        self.epsilon = epsilon
+        self.replay_buffer = []
+        self.max_buffer_size = 1000
+        
+        self.model = self._build_model()
+        self.target_model = self._build_model()
+        self.update_target_counter = 0
+
+    def _build_model(self) -> tf.keras.Model:
+        model = models.Sequential([
+            layers.Input(shape=(self.feature_dim,)),
+            layers.Dense(self.hidden_dim, activation='relu'),
+            layers.Dense(self.hidden_dim, activation='relu'),
+            layers.Dense(1, activation='linear')
+        ])
+        model.compile(optimizer=optimizers.Adam(learning_rate=self.lr), loss='mse')
+        return model
+
+    def get_action(self, state: np.ndarray, num_clients: int, k: int, context: Dict[str, Any] = None) -> List[int]:
+        print(f"using TensorFlow DQNAgent (dim={self.feature_dim})")
+        context = context or {}
+        active_indices = context.get("active_indices", list(range(num_clients)))
+        k = min(k, len(active_indices))
+        if k == 0 or state.shape[0] == 0:
+            return []
+
+        # Predict Q-values for all clients in state
+        q_values = self.model.predict(state, verbose=0).flatten()
+
+        scores = np.full(num_clients, -np.inf, dtype=np.float64)
+        for idx in active_indices:
+            if np.random.rand() < self.epsilon:
+                scores[idx] = np.random.rand()
+            else:
+                scores[idx] = float(q_values[idx])
+
+        # Pick top k indices with highest scores among active clients (Action Masking)
+        selected_indices = np.argsort(scores)[::-1][:k].tolist()
+        print(f"[DQN Agent] Selected top {len(selected_indices)} clients out of {len(active_indices)} active clients.")
+        return selected_indices
+
+    def update(self, state: np.ndarray, action: List[int], reward: float, next_state: np.ndarray, context: Dict[str, Any] = None):
+        context = context or {}
+        vector_rewards = context.get("vector_rewards", {})
+
+        # Store transition features per client
+        for idx in range(len(state)):
+            x_i = state[idx]
+            r_i = vector_rewards.get(idx, reward if idx in action else 0.0)
+            x_next_i = next_state[idx] if idx < len(next_state) else x_i
+            
+            if len(self.replay_buffer) >= self.max_buffer_size:
+                self.replay_buffer.pop(0)
+            self.replay_buffer.append((x_i, r_i, x_next_i))
+
+        # Train model using mini-batch from replay buffer
+        batch_size = min(32, len(self.replay_buffer))
+        if batch_size > 0:
+            indices = np.random.choice(len(self.replay_buffer), size=batch_size, replace=False)
+            batch = [self.replay_buffer[i] for i in indices]
+            
+            states_b = np.array([item[0] for item in batch], dtype=np.float32)
+            rewards_b = np.array([item[1] for item in batch], dtype=np.float32)
+            next_states_b = np.array([item[2] for item in batch], dtype=np.float32)
+
+            next_q_target = self.target_model.predict(next_states_b, verbose=0).flatten()
+            y_targets = rewards_b + self.gamma * next_q_target
+            
+            self.model.train_on_batch(states_b, y_targets)
+
+        self.update_target_counter += 1
+        if self.update_target_counter % 5 == 0:
+            self.target_model.set_weights(self.model.get_weights())
+            print("[DQN Agent] Updated target network weights.")
+
 
 class RLClientSelector(ClientSelector):
     def __init__(self, agent: BaseRLAgent, env: Any):
