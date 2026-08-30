@@ -1,0 +1,1 @@
+{'anomaly_accuracy': 0.28022895301693296, 'disease_accuracy': 0.14285714285714285, 'disease_f1': 0.25}

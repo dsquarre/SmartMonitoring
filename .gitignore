@@ -16,3 +16,12 @@ certs/
 *.key
 *.crt
 fl.yaml
+dashboard/node_modules/
+server/static/
+/run/
+*.log
+client/run_logs/
+.env
+server/.env
+client/.env
+.venv/
