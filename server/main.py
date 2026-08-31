@@ -11,8 +11,8 @@ from collections import deque
 import random
 import numpy as np
 import time
-from selector import RandomClientSelector, RLClientSelector, RandomRLAgent, QLearningAgent
-from aggregator import FedAvg, FedFV, qFedAvg, FedAdam
+from selector import RandomClientSelector, get_selector_by_name
+from aggregator import get_aggregator_by_name, FedAvg
 from rl_env import FederatedEnv
 import hashlib
 import hmac
@@ -286,20 +286,13 @@ class FederatedServer:
             }
             
         self.env = FederatedEnv(profiles, model_size_bits=10_000_000)
-        self.agent = QLearningAgent()
         
-        # Load Q-table from Redis if available
-        try:
-            q_data = redis_sync.get("fl:rl:q_table")
-            if q_data:
-                q_dict = json.loads(q_data)
-                self.agent.q_table = {k: np.array(v, dtype=np.float32) for k, v in q_dict.items()}
-                print("Successfully loaded RL agent Q-table from Redis.")
-        except Exception as e:
-            print(f"Could not load Q-table: {e}")
-            
-        self.selector = selector or RLClientSelector(self.agent, self.env)
-        self.aggregator = aggregator or FedAvg()
+        sel_name = os.environ.get("FL_SELECTOR", "random")
+        agg_name = os.environ.get("FL_AGGREGATOR", "fedavg")
+        
+        self.selector = selector or get_selector_by_name(sel_name, env=self.env)
+        self.aggregator = aggregator or get_aggregator_by_name(agg_name)
+        print(f"[FederatedServer] Initialized with Selector: {self.selector.__class__.__name__}, Aggregator: {self.aggregator.__class__.__name__}")
 
     async def start(self):
         global K, ROUNDS
@@ -599,12 +592,8 @@ class FederatedServer:
                     }
                 }
                 
-                # Polymorphic policy update for any selector strategy (Q-Learning, PPO, DQN, AlphaZero, etc.)
+                # Polymorphic policy update for any selector strategy
                 self.selector.update_policy(round_summary)
-                
-                # Persist Q-table to Redis if agent maintains a q_table
-                if hasattr(self.selector, "agent") and hasattr(self.selector.agent, "q_table"):
-                    await redis_async.set("fl:rl:q_table", json.dumps({k: v.tolist() for k, v in self.selector.agent.q_table.items()}))
                     
                 # Broadcast latest metrics to active clients
                 metrics_payload = json.dumps(round_history[-1])
@@ -761,3 +750,41 @@ async def mock_s3_upload(key: str, request: Request):
         f.write(body)
     print(f"[Mock S3 Route] Saved uploaded file to {file_path} (size: {len(body)} bytes)")
     return {"status": "success"}
+
+
+if __name__ == "__main__":
+    import argparse
+    import uvicorn
+
+    parser = argparse.ArgumentParser(description="Federated Learning Server")
+    parser.add_argument("-s", "--selector", type=str, default=os.environ.get("FL_SELECTOR", "random"),
+                        help="Client selection strategy: random, linucb, dqn, hierarchical (default: random)")
+    parser.add_argument("-a", "--aggregator", type=str, default=os.environ.get("FL_AGGREGATOR", "fedavg"),
+                        help="Model aggregation strategy: fedavg, qfedavg, fedfv, fedadam, fedprox, krum, scaffold (default: fedavg)")
+    parser.add_argument("-n", "--clients", type=int, default=int(os.environ.get("FL_N", "10")),
+                        help="Total client count threshold for coordinator (default: 10)")
+    parser.add_argument("-k", "--select-k", type=int, default=int(os.environ.get("FL_K", "3")),
+                        help="Clients selected per round (default: 3)")
+    parser.add_argument("-r", "--rounds", type=int, default=int(os.environ.get("FL_ROUNDS", "20")),
+                        help="Total federated rounds (default: 20)")
+    parser.add_argument("--host", type=str, default=os.environ.get("HOST", "0.0.0.0"),
+                        help="Listen host IP (default: 0.0.0.0)")
+    parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8000")),
+                        help="Listen port (default: 8000)")
+
+    args = parser.parse_args()
+
+    os.environ["FL_SELECTOR"] = args.selector
+    os.environ["FL_AGGREGATOR"] = args.aggregator
+    os.environ["FL_N"] = str(args.clients)
+    os.environ["FL_K"] = str(args.select_k)
+    os.environ["FL_ROUNDS"] = str(args.rounds)
+
+    print(f"Starting Federated Server with CLI parameters:")
+    print(f"  Selector:   {args.selector}")
+    print(f"  Aggregator: {args.aggregator}")
+    print(f"  Clients N:  {args.clients}")
+    print(f"  Select K:   {args.select_k}")
+    print(f"  Rounds:     {args.rounds}")
+
+    uvicorn.run("main:app", host=args.host, port=args.port, reload=False)
