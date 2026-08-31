@@ -279,6 +279,10 @@ class FedAdam(ModelAggregator):
         self.v = None
         self.t = 0
 
+    @property
+    def mode(self):
+        return "weights"
+
     def aggregate(self,client_data,global_model_path,current_round):
         if self.previous_global_model is None:
             self.previous_global_model = global_model_path
