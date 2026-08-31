@@ -85,26 +85,9 @@ def aggregate_models_task(
     print(f"[Celery Worker] Creating local directory {local_dir}")
     os.makedirs(local_dir, exist_ok=True)
     
-    # Instantiate the aggregator
-    if strategy_name == "FedAvg":
-        aggregator = FedAvg()
-    elif strategy_name == "qFedAvg":
-        aggregator = qFedAvg(q=strategy_config.get("q", 0.5))
-    elif strategy_name == "FedAdam":
-        aggregator = FedAdam(
-            lr=strategy_config.get("lr", 0.001),
-            beta1=strategy_config.get("beta1", 0.9),
-            beta2=strategy_config.get("beta2", 0.999),
-            epsilon=strategy_config.get("epsilon", 1e-8)
-        )
-    elif strategy_name == "FedFV":
-        aggregator = FedFV(
-            num_clients=strategy_config.get("num_clients", 10),
-            alpha=strategy_config.get("alpha", 0.1),
-            tau=strategy_config.get("tau", 1)
-        )
-    else:
-        raise ValueError(f"Unknown aggregation strategy: {strategy_name}")
+    # Instantiate the aggregator dynamically using factory
+    from aggregator import get_aggregator_by_name
+    aggregator = get_aggregator_by_name(strategy_name, **strategy_config)
 
     print(f"[Celery Worker] Starting aggregation for strategy: {strategy_name}, round: {current_round}")
 
