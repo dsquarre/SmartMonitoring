@@ -274,7 +274,6 @@ class FedAdam(ModelAggregator):
         self.beta1 = beta1
         self.beta2 = beta2
         self.epsilon = epsilon
-        self.previous_global_model = ("models/global_model_0.keras")
         self.m = None
         self.v = None
         self.t = 0
@@ -283,51 +282,48 @@ class FedAdam(ModelAggregator):
     def mode(self):
         return "weights"
 
-    def aggregate(self,client_data,global_model_path,current_round):
-        if self.previous_global_model is None:
-            self.previous_global_model = global_model_path
-            global_model = Model()
-            global_model.model.save( global_model_path)
+    def aggregate(self, client_data, global_model_path, current_round):
+        print("Using FedAdam")
+        client_data = filter_poisoned_clients(client_data, global_model_path, mode="weights")
+        if not client_data:
             return
 
-        client_data = filter_poisoned_clients(client_data, self.previous_global_model, mode="weights")
         global_model = Model()
-        print("Using FedAdam")
-
-        global_model.model.load_weights(self.previous_global_model)
-        global_weights = (global_model.model.get_weights())
+        global_model.model.load_weights(global_model_path)
+        global_weights = global_model.model.get_weights()
         total_samples = sum(samples for _, samples, *_, _ in client_data)
+        if total_samples == 0:
+            return
+
         aggregated_gradient = [np.zeros_like(layer) for layer in global_weights]
 
-        for (model_path,samples,loss,client_id, *_, _) in client_data:
+        for (model_path, samples, loss, client_id, *_, _) in client_data:
             local_model = Model()
             local_model.model.load_weights(model_path)
-            local_weights = (local_model.model.get_weights())
-            client_weight = (samples / total_samples)
+            local_weights = local_model.model.get_weights()
+            client_weight = samples / total_samples
 
             for i in range(len(global_weights)):
-                grad = (local_weights[i]-global_weights[i])
-                aggregated_gradient[i] += ( client_weight * grad)
+                grad = local_weights[i] - global_weights[i]
+                aggregated_gradient[i] += client_weight * grad
 
         if self.m is None:
-
-            self.m = [ np.zeros_like(layer) for layer in aggregated_gradient]
+            self.m = [np.zeros_like(layer) for layer in aggregated_gradient]
             self.v = [np.zeros_like(layer) for layer in aggregated_gradient]
 
         self.t += 1
         new_weights = []
         for i in range(len(global_weights)):
             g = aggregated_gradient[i]
-            self.m[i] = (self.beta1* self.m[i]+(1 - self.beta1)* g)
-            self.v[i] = (self.beta2* self.v[i]+(1 - self.beta2)* np.square(g))
-            m_hat = (self.m[i]/(1-self.beta1 ** self.t))
-            v_hat = (self.v[i]/(1-self.beta2 ** self.t))
-            update = (self.lr*m_hat/(np.sqrt(v_hat)+self.epsilon))
-            new_weights.append(global_weights[i]+update)
+            self.m[i] = self.beta1 * self.m[i] + (1 - self.beta1) * g
+            self.v[i] = self.beta2 * self.v[i] + (1 - self.beta2) * np.square(g)
+            m_hat = self.m[i] / (1 - self.beta1 ** self.t)
+            v_hat = self.v[i] / (1 - self.beta2 ** self.t)
+            update = self.lr * m_hat / (np.sqrt(v_hat) + self.epsilon)
+            new_weights.append(global_weights[i] + update)
 
         global_model.model.set_weights(new_weights)
         global_model.model.save(global_model_path)
-        self.previous_global_model = (global_model_path)
 
 class FedProx(ModelAggregator):
     """
