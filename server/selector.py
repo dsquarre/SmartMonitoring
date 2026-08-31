@@ -452,15 +452,18 @@ class RLClientSelector(ClientSelector):
 
 class MetaAggregatorAgent:
     """
-    Level 1 Meta-Controller Agent for selecting the aggregation strategy using D-LinUCB.
+    Level 1 Meta-Controller Agent for selecting the aggregation strategy.
+    Supports both Discounted-LinUCB (D-LinUCB) and Weighted Least Squares Thompson Sampling (WLS-TS).
     Strategies: ["FedAvg", "qFedAvg", "FedFV", "FedAdam", "FedProx", "Krum", "SCAFFOLD"]
     Input State S^(1) in R^5: [round_progress, global_loss_delta, loss_variance, avg_system_latency, poison_alert_flag]
     """
     STRATEGIES = ["FedAvg", "qFedAvg", "FedFV", "FedAdam", "FedProx", "Krum", "SCAFFOLD"]
 
-    def __init__(self, alpha: float = 1.0, gamma: float = 0.95, feature_dim: int = 5):
+    def __init__(self, mode: str = "d-linucb", alpha: float = 1.0, gamma: float = 0.95, sigma: float = 0.25, feature_dim: int = 5):
+        self.mode = mode.lower()
         self.alpha = alpha
         self.gamma = gamma
+        self.sigma = sigma
         self.feature_dim = feature_dim
         self.num_actions = len(self.STRATEGIES)
         self.A = [np.eye(feature_dim, dtype=np.float64) for _ in range(self.num_actions)]
@@ -470,22 +473,35 @@ class MetaAggregatorAgent:
     def select_strategy(self, global_state: np.ndarray) -> Tuple[int, str]:
         x = global_state.reshape(-1, 1)
         scores = np.zeros(self.num_actions, dtype=np.float64)
-        
-        for k in range(self.num_actions):
-            A_inv = np.linalg.inv(self.A[k])
-            theta_k = A_inv @ self.b[k]
-            exp_reward = float((theta_k.T @ x).item())
-            uncert = float(np.sqrt((x.T @ A_inv @ x).item()))
-            scores[k] = exp_reward + self.alpha * uncert
 
-        # Random tie-breaking among maximum score candidates
-        max_score = np.max(scores)
-        candidates = np.where(np.isclose(scores, max_score, atol=1e-5))[0]
-        best_idx = int(np.random.choice(candidates))
+        if self.mode in ["wls-ts", "wlsts", "thompson"]:
+            for k in range(self.num_actions):
+                A_inv = np.linalg.inv(self.A[k])
+                hat_theta = (A_inv @ self.b[k]).flatten()
+                cov = (self.sigma ** 2) * A_inv
+                try:
+                    tilde_theta = np.random.multivariate_normal(hat_theta, cov)
+                except Exception:
+                    tilde_theta = hat_theta
+                scores[k] = float(np.dot(tilde_theta, global_state))
+            best_idx = int(np.argmax(scores))
+            print(f"[Meta-Controller (WLS-TS)] Selected Aggregation Strategy: {self.STRATEGIES[best_idx]} (index {best_idx}) via Thompson Sampling")
+        else:
+            for k in range(self.num_actions):
+                A_inv = np.linalg.inv(self.A[k])
+                theta_k = A_inv @ self.b[k]
+                exp_reward = float((theta_k.T @ x).item())
+                uncert = float(np.sqrt((x.T @ A_inv @ x).item()))
+                scores[k] = exp_reward + self.alpha * uncert
+
+            # Random tie-breaking among maximum score candidates
+            max_score = np.max(scores)
+            candidates = np.where(np.isclose(scores, max_score, atol=1e-5))[0]
+            best_idx = int(np.random.choice(candidates))
+            print(f"[Meta-Controller (D-LinUCB)] Selected Aggregation Strategy: {self.STRATEGIES[best_idx]} (index {best_idx})")
 
         self.last_action_idx = best_idx
         strategy_name = self.STRATEGIES[best_idx]
-        print(f"[Meta-Controller] Selected Aggregation Strategy: {strategy_name} (index {best_idx})")
         return best_idx, strategy_name
 
     def update(self, global_state: np.ndarray, action_idx: int, reward: float):
@@ -493,7 +509,7 @@ class MetaAggregatorAgent:
         # Apply exponential discounting factor gamma to past observations
         self.A[action_idx] = self.gamma * self.A[action_idx] + (1.0 - self.gamma) * np.eye(self.feature_dim, dtype=np.float64) + (x @ x.T)
         self.b[action_idx] = self.gamma * self.b[action_idx] + reward * x
-        print(f"[Meta-Controller] Updated D-LinUCB weights for strategy '{self.STRATEGIES[action_idx]}' (gamma={self.gamma}).")
+        print(f"[Meta-Controller ({self.mode.upper()})] Updated weights for strategy '{self.STRATEGIES[action_idx]}' (gamma={self.gamma}).")
 
 class HierarchicalFLSelector(ClientSelector):
     """
