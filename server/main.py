@@ -364,6 +364,11 @@ class FederatedServer:
             selected_set = set(selected_ids)
             print(f"Selected clients for training: {selected_ids}")
             
+            # Sync active aggregator strategy if selector is hierarchical meta-controller
+            if hasattr(self.selector, "last_chosen_agg") and self.selector.last_chosen_agg:
+                chosen_strategy_name = self.selector.last_chosen_agg
+                self.aggregator = get_aggregator_by_name(chosen_strategy_name)
+
             # Generate GET presigned URL for current global model weights
             global_model_key = f"models/global/global_model_{current_round}.keras"
             download_url = generate_presigned_download_url(global_model_key)
@@ -429,16 +434,22 @@ class FederatedServer:
             # Prepare configuration config dictionary to pass to Celery
             strategy_config = {}
             if isinstance(self.aggregator, qFedAvg):
-                strategy_config["q"] = self.aggregator.q
+                strategy_config["q"] = getattr(self.aggregator, "q", 0.5)
             elif isinstance(self.aggregator, FedAdam):
-                strategy_config["lr"] = self.aggregator.lr
-                strategy_config["beta1"] = self.aggregator.beta1
-                strategy_config["beta2"] = self.aggregator.beta2
-                strategy_config["epsilon"] = self.aggregator.epsilon
+                strategy_config["lr"] = getattr(self.aggregator, "lr", 0.001)
+                strategy_config["beta1"] = getattr(self.aggregator, "beta1", 0.9)
+                strategy_config["beta2"] = getattr(self.aggregator, "beta2", 0.999)
+                strategy_config["epsilon"] = getattr(self.aggregator, "epsilon", 1e-8)
             elif isinstance(self.aggregator, FedFV):
-                strategy_config["num_clients"] = self.aggregator.num_clients
-                strategy_config["alpha"] = self.aggregator.alpha
-                strategy_config["tau"] = self.aggregator.tau
+                strategy_config["num_clients"] = getattr(self.aggregator, "num_clients", 10)
+                strategy_config["alpha"] = getattr(self.aggregator, "alpha", 0.1)
+                strategy_config["tau"] = getattr(self.aggregator, "tau", 1)
+            elif isinstance(self.aggregator, FedProx):
+                strategy_config["mu"] = getattr(self.aggregator, "mu", 0.01)
+            elif isinstance(self.aggregator, Krum):
+                strategy_config["num_byzantine"] = getattr(self.aggregator, "num_byzantine", 1)
+            elif isinstance(self.aggregator, SCAFFOLD):
+                strategy_config["lr"] = getattr(self.aggregator, "lr", 1.0)
                 
             # Map client uploads for Celery payload
             uploads_payload = []
