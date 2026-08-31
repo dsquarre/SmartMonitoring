@@ -12,7 +12,7 @@ import random
 import numpy as np
 import time
 from selector import RandomClientSelector, get_selector_by_name
-from aggregator import get_aggregator_by_name, FedAvg
+from aggregator import get_aggregator_by_name, FedAvg, qFedAvg, FedAdam, FedFV, FedProx, Krum, SCAFFOLD
 from rl_env import FederatedEnv
 import hashlib
 import hmac
