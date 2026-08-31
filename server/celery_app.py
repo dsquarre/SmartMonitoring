@@ -116,7 +116,12 @@ def aggregate_models_task(
     next_global_local_path = os.path.join(local_dir, f"global_model_{current_round}.keras")
 
     print(f"[Celery Worker] Downloading previous global model from S3: {prev_global_s3_key}")
-    download_file(prev_global_s3_key, prev_global_local_path)
+    success = download_file(prev_global_s3_key, prev_global_local_path)
+    if not success:
+        raise RuntimeError(
+            f"Failed to download previous global model checkpoint '{prev_global_s3_key}' from storage. "
+            f"Please ensure S3_MOCK=true is set in BOTH the server and Celery environment."
+        )
     shutil.copyfile(prev_global_local_path, next_global_local_path)
 
     # Process client uploads
@@ -162,7 +167,7 @@ def aggregate_models_task(
             global_model = Model()
             global_model.model.load_weights(next_global_local_path)
             for var, gg in zip(global_model.model.trainable_variables, global_gt):
-                var.assign(var.read_value() - gg)
+                var.assign(var.numpy() - gg)
             global_model.model.save(next_global_local_path)
             
             # Serialize global gradients to list so coordinator can broadcast it to clients
