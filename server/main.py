@@ -143,7 +143,7 @@ def plot_metrics_local(round_history):
 
     # loss
     plt.figure(figsize=(8, 5))
-    plt.plot(rounds, [x["total_loss"] for x in round_history], marker='o', label='Total Loss')
+    plt.plot(rounds, [x.get("loss", x.get("total_loss", 0.0)) for x in round_history], marker='o', label='Loss')
     plt.xlabel("Federated Round")
     plt.ylabel("Loss")
     plt.title("Loss vs Federated Round")
@@ -154,8 +154,7 @@ def plot_metrics_local(round_history):
 
     # accuracy
     plt.figure(figsize=(8, 5))
-    plt.plot(rounds, [x["anomaly_accuracy"] for x in round_history], marker='o', label='Anomaly Accuracy')
-    plt.plot(rounds, [x["disease_accuracy"] for x in round_history], marker='o', label='Disease Accuracy')
+    plt.plot(rounds, [x.get("accuracy", x.get("anomaly_accuracy", 0.0)) for x in round_history], marker='o', label='Accuracy')
     plt.xlabel("Federated Round")
     plt.ylabel("Accuracy")
     plt.title("Accuracy vs Federated Round")
@@ -164,12 +163,13 @@ def plot_metrics_local(round_history):
     plt.savefig("accuracy_vs_round.png")
     plt.close()
 
-    # F1
+    # F1 & ROC AUC
     plt.figure(figsize=(8, 5))
-    plt.plot(rounds, [x["disease_f1"] for x in round_history], marker='o', label='Disease F1')
+    plt.plot(rounds, [x.get("f1", x.get("disease_f1", 0.0)) for x in round_history], marker='o', label='F1 Score')
+    plt.plot(rounds, [x.get("roc_auc", 0.5) for x in round_history], marker='s', label='ROC AUC')
     plt.xlabel("Federated Round")
-    plt.ylabel("Disease F1 Score")
-    plt.title("Disease F1 vs Federated Round")
+    plt.ylabel("Score")
+    plt.title("F1 Score & ROC AUC vs Federated Round")
     plt.legend()
     plt.grid(True)
     plt.savefig("f1_vs_round.png")

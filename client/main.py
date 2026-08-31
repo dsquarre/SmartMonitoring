@@ -221,10 +221,10 @@ class Client:
 
         rounds = [x["round"] for x in self.global_metrics_history]
 
-        # Total Loss
+        # Loss
         plt.figure(figsize=(8, 5))
-        plt.plot(rounds, [x["total_loss"] for x in self.local_metrics_history], marker='o', label='Local Loss')
-        plt.plot(rounds, [x["total_loss"] for x in self.global_metrics_history], marker='x', label='Global Loss')
+        plt.plot(rounds, [x.get("loss", x.get("total_loss", 0.0)) for x in self.local_metrics_history], marker='o', label='Local Loss')
+        plt.plot(rounds, [x.get("loss", x.get("total_loss", 0.0)) for x in self.global_metrics_history], marker='x', label='Global Loss')
         plt.xlabel("Federated Round")
         plt.ylabel("Loss")
         plt.title(f"Loss vs Federated Round - Client {self.client_id}")
@@ -235,10 +235,8 @@ class Client:
 
         # Accuracy
         plt.figure(figsize=(8, 5))
-        plt.plot(rounds, [x["anomaly_accuracy"] for x in self.local_metrics_history], marker='o', label='Local Anomaly Accuracy')
-        plt.plot(rounds, [x["disease_accuracy"] for x in self.local_metrics_history], marker='o', label='Local Disease Accuracy')
-        plt.plot(rounds, [x["anomaly_accuracy"] for x in self.global_metrics_history], marker='x', label='Global Anomaly Accuracy')
-        plt.plot(rounds, [x["disease_accuracy"] for x in self.global_metrics_history], marker='x', label='Global Disease Accuracy')
+        plt.plot(rounds, [x.get("accuracy", x.get("anomaly_accuracy", 0.0)) for x in self.local_metrics_history], marker='o', label='Local Accuracy')
+        plt.plot(rounds, [x.get("accuracy", x.get("anomaly_accuracy", 0.0)) for x in self.global_metrics_history], marker='x', label='Global Accuracy')
         plt.xlabel("Federated Round")
         plt.ylabel("Accuracy")
         plt.title(f"Accuracy vs Federated Round - Client {self.client_id}")
@@ -247,13 +245,15 @@ class Client:
         plt.savefig(f"metrics/accuracy_vs_round_client_{self.client_id}.png")
         plt.close()
 
-        # F1 Score
+        # F1 Score & ROC AUC
         plt.figure(figsize=(8, 5))
-        plt.plot(rounds, [x["disease_f1"] for x in self.local_metrics_history], marker='o', label='Local Disease F1')
-        plt.plot(rounds, [x["disease_f1"] for x in self.global_metrics_history], marker='x', label='Global Disease F1')
+        plt.plot(rounds, [x.get("f1", x.get("disease_f1", 0.0)) for x in self.local_metrics_history], marker='o', label='Local F1')
+        plt.plot(rounds, [x.get("f1", x.get("disease_f1", 0.0)) for x in self.global_metrics_history], marker='x', label='Global F1')
+        plt.plot(rounds, [x.get("roc_auc", 0.5) for x in self.local_metrics_history], marker='s', label='Local ROC AUC')
+        plt.plot(rounds, [x.get("roc_auc", 0.5) for x in self.global_metrics_history], marker='d', label='Global ROC AUC')
         plt.xlabel("Federated Round")
-        plt.ylabel("Disease F1 Score")
-        plt.title(f"Disease F1 vs Federated Round - Client {self.client_id}")
+        plt.ylabel("Score")
+        plt.title(f"F1 & ROC AUC vs Federated Round - Client {self.client_id}")
         plt.legend()
         plt.grid(True)
         plt.savefig(f"metrics/f1_vs_round_client_{self.client_id}.png")
@@ -296,7 +296,7 @@ async def simulate(client):
                     
                     # Evaluate pre-train metrics
                     pre_train_metrics = await asyncio.to_thread(client.model.evaluate)
-                    train_loss = pre_train_metrics["total_loss"]
+                    train_loss = pre_train_metrics.get("loss", pre_train_metrics.get("total_loss", 0.0))
 
                     # Start emissions tracker
                     tracker = EmissionsTracker(

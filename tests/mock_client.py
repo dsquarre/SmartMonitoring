@@ -190,10 +190,12 @@ async def run_mock_client(client_id):
                     
                     # Simulate evaluation
                     local_metrics = {
-                        "total_loss": 0.20 - (client.current_round * 0.02),
-                        "anomaly_accuracy": 0.85 + (client.current_round * 0.01),
-                        "disease_accuracy": 0.82 + (client.current_round * 0.01),
-                        "disease_f1": 0.80 + (client.current_round * 0.01)
+                        "loss": 0.20 - (client.current_round * 0.02),
+                        "accuracy": 0.85 + (client.current_round * 0.01),
+                        "precision": 0.84 + (client.current_round * 0.01),
+                        "recall": 0.83 + (client.current_round * 0.01),
+                        "f1": 0.80 + (client.current_round * 0.01),
+                        "roc_auc": 0.88 + (client.current_round * 0.01)
                     }
                     
                     # Report metrics
