@@ -194,6 +194,24 @@ def plot_metrics_local(round_history):
     plt.grid(True, linestyle=':')
     plt.savefig("system_resources_vs_round.png")
     plt.close()
+
+    # Confusion Matrix (Latest Round)
+    latest = round_history[-1]
+    count_keys = ["tn", "fp", "fn", "tp"]
+    if all(k in latest for k in count_keys):
+        cm = np.array([[int(latest["tn"]), int(latest["fp"])],
+                       [int(latest["fn"]), int(latest["tp"])]])
+        plt.figure(figsize=(6, 5))
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                    xticklabels=['Normal (0)', 'AFib (1)'],
+                    yticklabels=['Normal (0)', 'AFib (1)'])
+        plt.xlabel("Predicted Label")
+        plt.ylabel("True Label")
+        plt.title(f"Global Confusion Matrix (Round {latest.get('round', '')})")
+        plt.tight_layout()
+        plt.savefig("confusion_matrix_latest.png")
+        plt.close()
+
     print("Metric plots saved locally.")
 
 def get_client_password_hash(client_id: str) -> str:
@@ -531,11 +549,15 @@ class FederatedServer:
                 total_samples = sum(ev["samples"] for ev in evals)
                 metric_names = evals[0]["metrics"].keys()
                 round_metrics = {}
+                count_metrics = {"tp", "fp", "tn", "fn"}
                 for metric in metric_names:
-                    weighted_metric = 0.0
-                    for ev in evals:
-                        weighted_metric += (ev["metrics"][metric] * (ev["samples"] / total_samples))
-                    round_metrics[metric] = weighted_metric
+                    if metric in count_metrics:
+                        # Sum raw integer counts across all evaluating clients
+                        round_metrics[metric] = int(sum(ev["metrics"][metric] for ev in evals))
+                    else:
+                        # Weighted average for rate/percentage metrics (loss, accuracy, precision, recall, f1, roc_auc)
+                        weighted_metric = sum(ev["metrics"][metric] * (ev["samples"] / total_samples) for ev in evals)
+                        round_metrics[metric] = float(weighted_metric)
                 round_metrics["round"] = current_round
                 
                 # Fetch system metrics
@@ -557,7 +579,7 @@ class FederatedServer:
                     
                 # Plot and upload to S3
                 plot_metrics_local(round_history)
-                for plot_file in ["loss_vs_round.png", "accuracy_vs_round.png", "f1_vs_round.png", "system_resources_vs_round.png"]:
+                for plot_file in ["loss_vs_round.png", "accuracy_vs_round.png", "f1_vs_round.png", "system_resources_vs_round.png", "confusion_matrix_latest.png"]:
                     if os.path.exists(plot_file):
                         upload_file(plot_file, f"plots/{plot_file}")
                         

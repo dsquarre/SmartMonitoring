@@ -258,6 +258,24 @@ class Client:
         plt.grid(True)
         plt.savefig(f"metrics/f1_vs_round_client_{self.client_id}.png")
         plt.close()
+
+        # Local Confusion Matrix (Latest Round)
+        if len(self.local_metrics_history) > 0:
+            latest_local = self.local_metrics_history[-1]
+            count_keys = ["tn", "fp", "fn", "tp"]
+            if all(k in latest_local for k in count_keys):
+                cm = np.array([[int(latest_local["tn"]), int(latest_local["fp"])],
+                               [int(latest_local["fn"]), int(latest_local["tp"])]])
+                plt.figure(figsize=(6, 5))
+                sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                            xticklabels=['Normal (0)', 'AFib (1)'],
+                            yticklabels=['Normal (0)', 'AFib (1)'])
+                plt.xlabel("Predicted Label")
+                plt.ylabel("True Label")
+                plt.title(f"Client {self.client_id} Confusion Matrix")
+                plt.tight_layout()
+                plt.savefig(f"metrics/confusion_matrix_client_{self.client_id}.png")
+                plt.close()
         
         print(f"[{self.client_id}] Metric plots saved.")
 
