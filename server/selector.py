@@ -70,11 +70,15 @@ class LinUCBAgent(BaseRLAgent):
     """
     LinUCB Contextual Bandit Agent for fast, sample-efficient client selection.
     Learns linear reward model with Upper Confidence Bound exploration.
+    Supports dynamic feature dimensions (e.g. 8 for standalone RL, 15 for Hierarchical FL).
     """
     def __init__(self, alpha: float = 1.0, feature_dim: int = 8):
         self.alpha = alpha
         self.feature_dim = feature_dim
-        # Shared Ridge Regression covariance matrix A and target vector b
+        self._init_dim(feature_dim)
+
+    def _init_dim(self, feature_dim: int):
+        self.feature_dim = feature_dim
         self.A = np.eye(feature_dim, dtype=np.float64)
         self.b = np.zeros((feature_dim, 1), dtype=np.float64)
         self.A_inv = np.eye(feature_dim, dtype=np.float64)
@@ -87,6 +91,9 @@ class LinUCBAgent(BaseRLAgent):
         k = min(k, len(active_indices))
         if k == 0 or state.shape[0] == 0:
             return []
+
+        if state.ndim == 2 and state.shape[1] != self.feature_dim:
+            self._init_dim(state.shape[1])
 
         if self.recompute_inv:
             self.A_inv = np.linalg.inv(self.A)
@@ -102,7 +109,6 @@ class LinUCBAgent(BaseRLAgent):
             uncertainty = float(np.sqrt((x_i.T @ self.A_inv @ x_i).item()))
             scores[idx] = expected_reward + self.alpha * uncertainty
 
-
         # Pick top k indices with highest scores among active clients (Action Masking)
         selected_indices = np.argsort(scores)[::-1][:k].tolist()
         print(f"[LinUCB Agent] Selected top {len(selected_indices)} clients out of {len(active_indices)} active clients.")
@@ -112,6 +118,9 @@ class LinUCBAgent(BaseRLAgent):
         context = context or {}
         vector_rewards = context.get("vector_rewards", {})  # Dict[idx, reward]
         
+        if state.ndim == 2 and state.shape[1] != self.feature_dim:
+            self._init_dim(state.shape[1])
+
         for idx in range(len(state)):
             x_i = state[idx].reshape(-1, 1)
             r_i = vector_rewards.get(idx, reward if idx in action else 0.0)
@@ -153,6 +162,11 @@ class DQNAgent(BaseRLAgent):
         return model
 
     def get_action(self, state: np.ndarray, num_clients: int, k: int, context: Dict[str, Any] = None) -> List[int]:
+        if state.ndim == 2 and state.shape[1] != self.feature_dim:
+            self.feature_dim = state.shape[1]
+            self.model = self._build_model()
+            self.target_model = self._build_model()
+
         print(f"using TensorFlow DQNAgent (dim={self.feature_dim})")
         context = context or {}
         active_indices = context.get("active_indices", list(range(num_clients)))
