@@ -88,8 +88,9 @@ class FederatedEnv:
         norm_loss = self.loss_normalizer.normalize(avg_local_loss)
 
         # Multi-objective Reward formulation
-        reward = (w_perf * global_loss_delta) - (w_local * norm_loss) - (w_lat * norm_lat) - (w_eng * norm_eng) - (w_fair * loss_variance)
-        return reward
+        raw_reward = (w_perf * global_loss_delta) - (w_local * norm_loss) - (w_lat * norm_lat) - (w_eng * norm_eng) - (w_fair * loss_variance)
+        norm_reward = float(np.tanh(raw_reward / 10.0))
+        return norm_reward
 
     def calculate_vector_rewards(self, client_ids, selected_ids, selected_metrics, global_loss_delta, 
                                  client_losses, staleness_dict=None,
@@ -120,9 +121,9 @@ class FederatedEnv:
                 # Unselected client: penalty proportional to staleness to discourage starvation
                 stale_rounds = staleness_dict.get(cid, 0)
                 r_i = - (w_stale * stale_rounds)
-            client_rewards[cid] = float(r_i)
+            client_rewards[cid] = float(np.tanh(r_i / 10.0))
 
-        scalar_reward = sum(client_rewards.values())
+        scalar_reward = float(np.tanh(sum(client_rewards.values()) / 10.0))
         return client_rewards, scalar_reward
 
 
