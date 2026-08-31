@@ -162,6 +162,26 @@ class TestClientModel(unittest.TestCase):
             self.assertIn(key, eval_metrics)
             self.assertFalse(np.isnan(eval_metrics[key]), f"Metric {key} is NaN")
 
+    def test_load_and_train_real_npz_dataset(self):
+        real_npz_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "data", "iid", "client_0.npz"
+        )
+        if not os.path.exists(real_npz_path):
+            self.skipTest(f"Real dataset file not found at {real_npz_path}")
+
+        client_model = Model(real_npz_path, batch_size=32)
+        self.assertGreater(client_model.get_samples(), 0)
+
+        history = client_model.train(epochs=1, verbose=0)
+        self.assertIn('loss', history.history)
+        self.assertTrue(len(history.history['loss']) > 0)
+        self.assertFalse(np.isnan(history.history['loss'][0]))
+
+        eval_metrics = client_model.evaluate()
+        self.assertFalse(np.isnan(eval_metrics['loss']))
+        self.assertFalse(np.isnan(eval_metrics['accuracy']))
+
 
 if __name__ == "__main__":
     unittest.main()
