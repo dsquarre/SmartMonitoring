@@ -5,90 +5,40 @@ class Model:
 
     def __init__(self):
         self.model = self.build_model()
-
     def build_model(self):
+        inputs = tf.keras.Input(shape=(1000, 12), name='ecg_input')
 
-        inputs = tf.keras.Input(shape=(1000, 6))
-
-        x = tf.keras.layers.Conv1D(
-            64,
-            7,
-            padding='same',
-            activation='relu'
-        )(inputs)
-
+        # Block 1
+        x = tf.keras.layers.Conv1D(64, kernel_size=15, padding='same', activation='relu')(inputs)
         x = tf.keras.layers.BatchNormalization()(x)
+        x = tf.keras.layers.MaxPooling1D(pool_size=4)(x)
 
-        x = tf.keras.layers.MaxPooling1D(2)(x)
-
-        x = tf.keras.layers.Conv1D(
-            128,
-            5,
-            padding='same',
-            activation='relu'
-        )(x)
-
+        # Block 2
+        x = tf.keras.layers.Conv1D(128, kernel_size=7, padding='same', activation='relu')(x)
         x = tf.keras.layers.BatchNormalization()(x)
+        x = tf.keras.layers.MaxPooling1D(pool_size=4)(x)
 
-        x = tf.keras.layers.MaxPooling1D(2)(x)
-
-        x = tf.keras.layers.Conv1D(
-            256,
-            3,
-            padding='same',
-            activation='relu'
-        )(x)
-
+        # Block 3
+        x = tf.keras.layers.Conv1D(256, kernel_size=5, padding='same', activation='relu')(x)
         x = tf.keras.layers.BatchNormalization()(x)
-
-        x = tf.keras.layers.MaxPooling1D(2)(x)
-
-        x = tf.keras.layers.SeparableConv1D(256,3,padding='same',activation='relu')(x)
-
-        x = tf.keras.layers.BatchNormalization()(x)
-
         x = tf.keras.layers.GlobalAveragePooling1D()(x)
 
-        x = tf.keras.layers.Dense(
-            128,
-            activation='relu'
-        )(x)
-
+        # Classification Head
+        x = tf.keras.layers.Dense(128, activation='relu')(x)
         x = tf.keras.layers.Dropout(0.4)(x)
+        output = tf.keras.layers.Dense(1, activation='sigmoid', name='afib')(x)
 
-        anomaly_output = tf.keras.layers.Dense(
-            1,
-            activation='sigmoid',
-            name='anomaly'
-        )(x)
-
-        disease_output = tf.keras.layers.Dense(
-            4,
-            activation='softmax',
-            name='disease'
-        )(x)
-
-        model = tf.keras.Model(
-            inputs,
-            [anomaly_output, disease_output]
-        )
-
+        model = tf.keras.Model(inputs=inputs, outputs=output)
         model.compile(
-
-            optimizer=tf.keras.optimizers.Adam(
-                learning_rate=1e-4,
-                clipnorm=1.0
-            ),
-
-            loss={
-                'anomaly': 'binary_crossentropy',
-                'disease': 'categorical_crossentropy'
-            },
-
-            metrics={
-                'anomaly': 'accuracy',
-                'disease': 'categorical_accuracy'
-            }
+            optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3, clipnorm=1.0),
+            loss='binary_crossentropy',
+            metrics=[
+                'accuracy',
+                tf.keras.metrics.AUC(name='pr_auc', curve='PR'),
+                tf.keras.metrics.TruePositives(name='tp'),
+                tf.keras.metrics.FalsePositives(name='fp'),
+                tf.keras.metrics.TrueNegatives(name='tn'),
+                tf.keras.metrics.FalseNegatives(name='fn')
+            ]
         )
-
         return model
