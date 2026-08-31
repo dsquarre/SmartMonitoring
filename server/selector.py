@@ -68,12 +68,14 @@ class RandomRLAgent(BaseRLAgent):
 
 class LinUCBAgent(BaseRLAgent):
     """
-    LinUCB Contextual Bandit Agent for fast, sample-efficient client selection.
-    Learns linear reward model with Upper Confidence Bound exploration.
+    Discounted-LinUCB (D-LinUCB) Contextual Bandit Agent for piecewise-stationary environments.
+    Applies exponential discounting factor gamma in (0.90, 0.99) to past observations
+    to continuously adapt to model loss convergence while maintaining fast O(1) execution time.
     Supports dynamic feature dimensions (e.g. 8 for standalone RL, 15 for Hierarchical FL).
     """
-    def __init__(self, alpha: float = 1.0, feature_dim: int = 8):
+    def __init__(self, alpha: float = 1.0, gamma: float = 0.95, feature_dim: int = 8):
         self.alpha = alpha
+        self.gamma = gamma
         self.feature_dim = feature_dim
         self._init_dim(feature_dim)
 
@@ -85,7 +87,7 @@ class LinUCBAgent(BaseRLAgent):
         self.recompute_inv = True
 
     def get_action(self, state: np.ndarray, num_clients: int, k: int, context: Dict[str, Any] = None) -> List[int]:
-        print("using LinUCB contextual bandit")
+        print("using Discounted-LinUCB (D-LinUCB) contextual bandit")
         context = context or {}
         active_indices = context.get("active_indices", list(range(num_clients)))
         k = min(k, len(active_indices))
@@ -111,7 +113,7 @@ class LinUCBAgent(BaseRLAgent):
 
         # Pick top k indices with highest scores among active clients (Action Masking)
         selected_indices = np.argsort(scores)[::-1][:k].tolist()
-        print(f"[LinUCB Agent] Selected top {len(selected_indices)} clients out of {len(active_indices)} active clients.")
+        print(f"[D-LinUCB Agent] Selected top {len(selected_indices)} clients out of {len(active_indices)} active clients.")
         return selected_indices
 
     def update(self, state: np.ndarray, action: List[int], reward: float, next_state: np.ndarray, context: Dict[str, Any] = None):
@@ -121,17 +123,21 @@ class LinUCBAgent(BaseRLAgent):
         if state.ndim == 2 and state.shape[1] != self.feature_dim:
             self._init_dim(state.shape[1])
 
+        # Apply exponential discounting gamma to past covariance A and target vector b for non-stationarity
+        self.A = self.gamma * self.A + (1.0 - self.gamma) * np.eye(self.feature_dim, dtype=np.float64)
+        self.b = self.gamma * self.b
+
         for idx in range(len(state)):
             x_i = state[idx].reshape(-1, 1)
             r_i = vector_rewards.get(idx, reward if idx in action else 0.0)
             
-            # Update LinUCB model parameters for clients with reward signal
+            # Update D-LinUCB model parameters for clients with reward signal
             if idx in action or idx in vector_rewards:
                 self.A += x_i @ x_i.T
                 self.b += r_i * x_i
                 self.recompute_inv = True
                 
-        print(f"[LinUCB Agent] Updated LinUCB model parameters A and b.")
+        print(f"[D-LinUCB Agent] Updated D-LinUCB model parameters (gamma={self.gamma}).")
 
 class DQNAgent(BaseRLAgent):
     """
@@ -371,14 +377,15 @@ class RLClientSelector(ClientSelector):
 
 class MetaAggregatorAgent:
     """
-    Level 1 Meta-Controller Agent for selecting the aggregation strategy.
+    Level 1 Meta-Controller Agent for selecting the aggregation strategy using D-LinUCB.
     Strategies: ["FedAvg", "qFedAvg", "FedFV", "FedAdam", "FedProx", "Krum", "SCAFFOLD"]
     Input State S^(1) in R^5: [round_progress, global_loss_delta, loss_variance, avg_system_latency, poison_alert_flag]
     """
     STRATEGIES = ["FedAvg", "qFedAvg", "FedFV", "FedAdam", "FedProx", "Krum", "SCAFFOLD"]
 
-    def __init__(self, alpha: float = 0.5, feature_dim: int = 5):
+    def __init__(self, alpha: float = 1.0, gamma: float = 0.95, feature_dim: int = 5):
         self.alpha = alpha
+        self.gamma = gamma
         self.feature_dim = feature_dim
         self.num_actions = len(self.STRATEGIES)
         self.A = [np.eye(feature_dim, dtype=np.float64) for _ in range(self.num_actions)]
@@ -396,7 +403,11 @@ class MetaAggregatorAgent:
             uncert = float(np.sqrt((x.T @ A_inv @ x).item()))
             scores[k] = exp_reward + self.alpha * uncert
 
-        best_idx = int(np.argmax(scores))
+        # Random tie-breaking among maximum score candidates
+        max_score = np.max(scores)
+        candidates = np.where(np.isclose(scores, max_score, atol=1e-5))[0]
+        best_idx = int(np.random.choice(candidates))
+
         self.last_action_idx = best_idx
         strategy_name = self.STRATEGIES[best_idx]
         print(f"[Meta-Controller] Selected Aggregation Strategy: {strategy_name} (index {best_idx})")
@@ -404,9 +415,10 @@ class MetaAggregatorAgent:
 
     def update(self, global_state: np.ndarray, action_idx: int, reward: float):
         x = global_state.reshape(-1, 1)
-        self.A[action_idx] += x @ x.T
-        self.b[action_idx] += reward * x
-        print(f"[Meta-Controller] Updated weights for strategy '{self.STRATEGIES[action_idx]}'.")
+        # Apply exponential discounting factor gamma to past observations
+        self.A[action_idx] = self.gamma * self.A[action_idx] + (1.0 - self.gamma) * np.eye(self.feature_dim, dtype=np.float64) + (x @ x.T)
+        self.b[action_idx] = self.gamma * self.b[action_idx] + reward * x
+        print(f"[Meta-Controller] Updated D-LinUCB weights for strategy '{self.STRATEGIES[action_idx]}' (gamma={self.gamma}).")
 
 class HierarchicalFLSelector(ClientSelector):
     """
