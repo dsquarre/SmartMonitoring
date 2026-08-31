@@ -51,44 +51,40 @@ Add the client ID and hash to [server/credentials.json](file:///home/danish/Smar
   "client_11": "your_generated_sha256_hash_here"
 }
 ```
-
-### 2. Start the Client Node
-Start the client with the same client ID and password:
-```bash
-for i in $(seq 0 99); do
-  docker run -d \
-    --name "client_$i" \
-    -e CLIENT_ID="client_$i" \
-    -e SERVER_IP="10.0.0.1:8000" \
-    -e PASSWORD="P7h1!quiBO0no96" \
-    smartmonitoring-client:latest -d /data/dataset_$i.npz
-done
-```
-
 ---
 
 ## How to Use
 
 ### Client
 * **Parameters**:
-  - `-d, --dataset`: (Required) Path to the `.npz` local dataset.
+  - `-d, --dataset`: (Required) Path to the `.npz` local dataset file.
   - `-s, --server-ip`: Server IP or URL (e.g. `127.0.0.1:8000` or `https://my-fl-server.com`).
   - `-p, --password`: Password configured for the client ID.
   - `-c, --client-id`: The unique client ID registered in `credentials.json` (Defaults to `client_0`).
+  - `-f, --fingerprint`: Expected SHA-256 SSL certificate fingerprint for certificate pinning.
   - `--no-verify` / `--insecure`: Bypass SSL certificate checks (useful for testing self-signed SSL/TLS setups).
 
 ```bash
-# Example running locally
+# Example running client locally
 pip install -r client/requirements.txt
-python client/main.py -d data/C0.npz -s localhost:8000 -p P7h1!quiBO0no96 -c client_0
+python client/main.py -d data/iid/client_0.npz -s localhost:8000 -p 'P7h1!quiBO0no96' -c client_0 --no-verify
 ```
 
 ### Server
 * Ensure your hashed client credentials are set in [server/credentials.json](file:///home/danish/SmartMonitoring/server/credentials.json).
-* Run the server using uvicorn:
+* **Parameters**:
+  - `-s, --selector`: Client selection strategy (`random` [default], `linucb`, `dqn`, `hierarchical`).
+  - `-a, --aggregator`: Model aggregation strategy (`fedavg` [default], `qfedavg`, `fedfv`, `fedadam`, `fedprox`, `krum`, `scaffold`).
+  - `-n, --clients`: Total client count threshold required before coordinator starts (default: `3`).
+  - `-k, --select-k`: Number of clients selected per training round (default: `3`).
+  - `-r, --rounds`: Total number of FL training rounds (default: `5`).
+  - `--host`: Server listen host IP (default: `0.0.0.0`).
+  - `--port`: Server listen port (default: `8000`).
 
 ```bash
+# Example running server locally
 pip install -r server/requirements.txt
-python -m uvicorn main:app --host 0.0.0.0 --port 8000
+cd server
+python main.py -s random -a fedavg -n 10 -k 3 -r 20
 ```
 

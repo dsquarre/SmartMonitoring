@@ -35,9 +35,9 @@ except ImportError:
     pass
 
 # Configuration variables
-N = int(os.environ.get("FL_N", "10"))
+N = int(os.environ.get("FL_N", "3"))
 K = int(os.environ.get("FL_K", "3"))
-ROUNDS = int(os.environ.get("FL_ROUNDS", "2"))
+ROUNDS = int(os.environ.get("FL_ROUNDS", "5"))
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 
 # Loop-safe Async Redis Proxy to handle TestClient's loop closures
