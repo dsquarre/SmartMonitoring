@@ -570,8 +570,8 @@ class FederatedServer:
                         
             # --- Update Client Selector Policy ---
             if round_history:
-                current_loss = round_history[-1]["total_loss"]
-                prev_loss = round_history[-2]["total_loss"] if len(round_history) > 1 else current_loss
+                current_loss = round_history[-1].get("loss", round_history[-1].get("total_loss", 0.0))
+                prev_loss = round_history[-2].get("loss", round_history[-2].get("total_loss", current_loss)) if len(round_history) > 1 else current_loss
                 global_loss_delta = prev_loss - current_loss
                 
                 round_summary = {
