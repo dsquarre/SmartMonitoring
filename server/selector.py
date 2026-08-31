@@ -400,9 +400,9 @@ class HierarchicalFLSelector(ClientSelector):
     Level 1: MetaAggregatorAgent selects 1 of 7 Aggregation Strategies.
     Level 2: LinUCBAgent selects Top-K Clients conditioned on chosen Aggregation Strategy.
     """
-    def __init__(self, meta_agent: MetaAggregatorAgent, sub_agent: LinUCBAgent, env: Any):
-        self.meta_agent = meta_agent
-        self.sub_agent = sub_agent
+    def __init__(self, meta_agent: MetaAggregatorAgent = None, sub_agent: LinUCBAgent = None, env: Any = None):
+        self.meta_agent = meta_agent or MetaAggregatorAgent()
+        self.sub_agent = sub_agent or LinUCBAgent()
         self.env = env
         
         self.last_global_state = None
@@ -580,15 +580,19 @@ def get_selector_by_name(name: str, **kwargs) -> ClientSelector:
     if name_lower == "random":
         return RandomClientSelector()
     elif name_lower == "linucb":
-        num_clients = kwargs.get("num_clients", 100)
+        env = kwargs.get("env")
         feature_dim = kwargs.get("feature_dim", 8)
-        return LinUCBSelector(num_clients=num_clients, feature_dim=feature_dim)
+        agent = LinUCBAgent(feature_dim=feature_dim)
+        return RLClientSelector(agent, env)
     elif name_lower == "dqn":
         env = kwargs.get("env")
         agent = DQNAgent()
         return RLClientSelector(agent, env)
     elif name_lower == "hierarchical":
-        return HierarchicalFLSelector()
+        env = kwargs.get("env")
+        meta_agent = kwargs.get("meta_agent") or MetaAggregatorAgent()
+        sub_agent = kwargs.get("sub_agent") or LinUCBAgent()
+        return HierarchicalFLSelector(meta_agent=meta_agent, sub_agent=sub_agent, env=env)
     else:
         print(f"[Selector Warning] Unknown selector strategy '{name}'. Defaulting to RandomClientSelector.")
         return RandomClientSelector()
