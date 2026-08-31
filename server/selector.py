@@ -139,6 +139,81 @@ class LinUCBAgent(BaseRLAgent):
                 
         print(f"[D-LinUCB Agent] Updated D-LinUCB model parameters (gamma={self.gamma}).")
 
+class WLSTSAgent(BaseRLAgent):
+    """
+    Weighted Least Squares Thompson Sampling (WLS-TS) Agent (Burtini et al., 2015).
+    Combines Weighted Least Squares regression with Bayesian Posterior Sampling.
+    Applies exponential discounting factor gamma to past observations and samples parameter vector
+    tilde_theta ~ N(hat_theta, sigma^2 * A^-1) for posterior-driven exploration.
+    """
+    def __init__(self, gamma: float = 0.95, sigma: float = 0.25, feature_dim: int = 8):
+        self.gamma = gamma
+        self.sigma = sigma
+        self.feature_dim = feature_dim
+        self._init_dim(feature_dim)
+
+    def _init_dim(self, feature_dim: int):
+        self.feature_dim = feature_dim
+        self.A = np.eye(feature_dim, dtype=np.float64)
+        self.b = np.zeros((feature_dim, 1), dtype=np.float64)
+        self.A_inv = np.eye(feature_dim, dtype=np.float64)
+        self.recompute_inv = True
+
+    def get_action(self, state: np.ndarray, num_clients: int, k: int, context: Dict[str, Any] = None) -> List[int]:
+        print("using Weighted Least Squares Thompson Sampling (WLS-TS)")
+        context = context or {}
+        active_indices = context.get("active_indices", list(range(num_clients)))
+        k = min(k, len(active_indices))
+        if k == 0 or state.shape[0] == 0:
+            return []
+
+        if state.ndim == 2 and state.shape[1] != self.feature_dim:
+            self._init_dim(state.shape[1])
+
+        if self.recompute_inv:
+            self.A_inv = np.linalg.inv(self.A)
+            self.recompute_inv = False
+
+        hat_theta = (self.A_inv @ self.b).flatten()  # (feature_dim,)
+        cov = (self.sigma ** 2) * self.A_inv  # (feature_dim, feature_dim)
+
+        # Draw posterior sample tilde_theta ~ N(hat_theta, cov)
+        try:
+            tilde_theta = np.random.multivariate_normal(hat_theta, cov)
+        except Exception:
+            tilde_theta = hat_theta
+
+        scores = np.full(num_clients, -np.inf, dtype=np.float64)
+        for idx in active_indices:
+            x_i = state[idx]  # (feature_dim,)
+            scores[idx] = float(np.dot(tilde_theta, x_i))
+
+        selected_indices = np.argsort(scores)[::-1][:k].tolist()
+        print(f"[WLS-TS Agent] Selected top {len(selected_indices)} clients out of {len(active_indices)} active clients via Thompson Sampling.")
+        return selected_indices
+
+    def update(self, state: np.ndarray, action: List[int], reward: float, next_state: np.ndarray, context: Dict[str, Any] = None):
+        context = context or {}
+        vector_rewards = context.get("vector_rewards", {})
+
+        if state.ndim == 2 and state.shape[1] != self.feature_dim:
+            self._init_dim(state.shape[1])
+
+        # Apply exponential discounting factor gamma
+        self.A = self.gamma * self.A + (1.0 - self.gamma) * np.eye(self.feature_dim, dtype=np.float64)
+        self.b = self.gamma * self.b
+
+        for idx in range(len(state)):
+            x_i = state[idx].reshape(-1, 1)
+            r_i = vector_rewards.get(idx, reward if idx in action else 0.0)
+            
+            if idx in action or idx in vector_rewards:
+                self.A += x_i @ x_i.T
+                self.b += r_i * x_i
+                self.recompute_inv = True
+
+        print(f"[WLS-TS Agent] Updated WLS-TS posterior distribution parameters (gamma={self.gamma}).")
+
 class DQNAgent(BaseRLAgent):
     """
     TensorFlow/Keras Deep Q-Network Agent for client selection.
@@ -600,15 +675,20 @@ class HierarchicalFLSelector(ClientSelector):
 def get_selector_by_name(name: str, **kwargs) -> ClientSelector:
     """
     Factory function returning an instance of the requested ClientSelector strategy.
-    Supported names: 'random' (default), 'linucb', 'dqn', 'hierarchical'
+    Supported names: 'random' (default), 'linucb' / 'd-linucb', 'wls-ts' / 'thompson', 'dqn', 'hierarchical'
     """
     name_lower = (name or "random").lower()
     if name_lower == "random":
         return RandomClientSelector()
-    elif name_lower == "linucb":
+    elif name_lower in ["linucb", "d-linucb"]:
         env = kwargs.get("env")
         feature_dim = kwargs.get("feature_dim", 8)
         agent = LinUCBAgent(feature_dim=feature_dim)
+        return RLClientSelector(agent, env)
+    elif name_lower in ["wls-ts", "wlsts", "thompson"]:
+        env = kwargs.get("env")
+        feature_dim = kwargs.get("feature_dim", 8)
+        agent = WLSTSAgent(feature_dim=feature_dim)
         return RLClientSelector(agent, env)
     elif name_lower == "dqn":
         env = kwargs.get("env")
