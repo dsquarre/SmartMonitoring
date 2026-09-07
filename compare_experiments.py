@@ -348,6 +348,128 @@ def plot_pareto_frontier(group_data, output_dir):
         plt.close()
 
 
+def plot_3d_pareto_frontier(group_data, output_dir):
+    """
+    Plots a 3D Tradeoff Graph: F2 Accuracy vs (Latency & Energy)
+    X-axis: Cumulative Latency (s)
+    Y-axis: Cumulative Energy (J)
+    Z-axis: Final F2 Score Accuracy
+    """
+    colors = ['crimson', 'royalblue', 'forestgreen', 'darkorange', 'purple', 'teal']
+    fig = plt.figure(figsize=(10, 7.5))
+    ax = fig.add_subplot(111, projection='3d')
+
+    for i, (label, data) in enumerate(group_data.items()):
+        color = colors[i % len(colors)]
+        raw_runs = data["raw_runs"]
+
+        l_vals, e_vals, acc_vals = [], [], []
+        for run in raw_runs:
+            if not run:
+                continue
+            e_sum = sum(r.get("total_round_energy", 0.0) for r in run)
+            l_sum = sum(r.get("avg_comp_latency", 0.0) for r in run)
+            acc = run[-1].get("f2", run[-1].get("accuracy", 0.0))
+
+            l_vals.append(l_sum)
+            e_vals.append(e_sum)
+            acc_vals.append(acc)
+
+        if not l_vals:
+            continue
+
+        l_arr, e_arr, acc_arr = np.array(l_vals), np.array(e_vals), np.array(acc_vals)
+
+        # Plot individual seed scatter
+        ax.scatter(l_arr, e_arr, acc_arr, color=color, alpha=0.35, s=35)
+
+        # Plot mean point
+        l_mean, e_mean, acc_mean = float(np.mean(l_arr)), float(np.mean(e_arr)), float(np.mean(acc_arr))
+        ax.scatter([l_mean], [e_mean], [acc_mean], color=color, s=120, marker='s', edgecolors='black', linewidth=1.5, label=f"{label} (Mean)")
+
+        # Draw vertical stem line to floor for visual depth
+        min_acc = max(0.0, np.min(acc_arr) - 0.05)
+        ax.plot([l_mean, l_mean], [e_mean, e_mean], [min_acc, acc_mean], color=color, linestyle=':', linewidth=1.5)
+
+    ax.set_xlabel("Latency (Seconds)", fontsize=10, labelpad=8)
+    ax.set_ylabel("Energy (Joules)", fontsize=10, labelpad=8)
+    ax.set_zlabel("F2 Score (Accuracy)", fontsize=10, labelpad=8)
+    ax.set_title("3D Pareto Tradeoff: F2 Accuracy vs (Latency & Energy)", fontsize=12, pad=15)
+    ax.legend(loc="upper left")
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "comparison_pareto_3d_accuracy_vs_energy_latency.png"), dpi=300)
+    plt.close()
+
+
+def plot_joint_cost_pareto_frontier(group_data, output_dir):
+    """
+    Plots F2 Accuracy vs Energy-Delay Product (EDP = Cumulative Energy * Cumulative Latency).
+    This captures the joint tradeoff (Accuracy vs Combined Resource Cost) in a unified 2D chart.
+    """
+    colors = ['crimson', 'royalblue', 'forestgreen', 'darkorange', 'purple', 'teal']
+    plt.figure(figsize=(9, 6))
+    pareto_points = []
+
+    for i, (label, data) in enumerate(group_data.items()):
+        color = colors[i % len(colors)]
+        raw_runs = data["raw_runs"]
+
+        edp_vals, acc_vals = [], []
+        for run in raw_runs:
+            if not run:
+                continue
+            e_sum = sum(r.get("total_round_energy", 0.0) for r in run)
+            l_sum = sum(r.get("avg_comp_latency", 0.0) for r in run)
+            edp = e_sum * l_sum  # Energy-Delay Product
+            acc = run[-1].get("f2", run[-1].get("accuracy", 0.0))
+
+            edp_vals.append(edp)
+            acc_vals.append(acc)
+
+        if not edp_vals:
+            continue
+
+        edp_arr = np.array(edp_vals)
+        acc_arr = np.array(acc_vals)
+
+        edp_mean = float(np.mean(edp_arr))
+        acc_mean = float(np.mean(acc_arr))
+
+        n_samples = len(edp_arr)
+        if n_samples > 1:
+            edp_err = float(np.std(edp_arr) / np.sqrt(n_samples)) * 1.96
+            acc_err = float(np.std(acc_arr) / np.sqrt(n_samples)) * 1.96
+        else:
+            edp_err, acc_err = 0.0, 0.0
+
+        plt.scatter(edp_arr, acc_arr, color=color, alpha=0.35, s=40)
+        plt.errorbar(edp_mean, acc_mean, xerr=edp_err, yerr=acc_err, fmt='s', color=color,
+                     markersize=9, capsize=6, linewidth=2, label=f"{label} (Mean ± 95% CI)")
+
+        pareto_points.append((edp_mean, acc_mean, label, color))
+
+    if len(pareto_points) > 1:
+        pareto_points.sort(key=lambda pt: pt[0])
+        frontier_x, frontier_y = [], []
+        max_y = -np.inf
+        for x, y, _, _ in pareto_points:
+            if y > max_y:
+                frontier_x.append(x)
+                frontier_y.append(y)
+                max_y = y
+        if len(frontier_x) > 1:
+            plt.plot(frontier_x, frontier_y, 'k--', linewidth=1.8, label="Empirical Joint Pareto Frontier")
+
+    plt.xlabel("Joint Cost: Energy-Delay Product (Joules × Seconds)", fontsize=11)
+    plt.ylabel("Final F2 Score (Primary Accuracy)", fontsize=11)
+    plt.title("Joint Tradeoff: F2 Accuracy vs Energy-Delay Product (EDP)", fontsize=12)
+    plt.legend(loc="lower right")
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "comparison_pareto_accuracy_vs_joint_cost.png"), dpi=300)
+    plt.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Comparative Metrics & Paired Hypothesis Analysis")
     parser.add_argument("--dirs", nargs="+", required=True, help="Run directories or glob patterns")
@@ -376,9 +498,11 @@ def main():
         print("[Error] Failed to load metrics from directories.")
         sys.exit(1)
 
-    # Plot overlay curves and Pareto frontier
+    # Plot overlay curves and Pareto frontiers (2D, 3D, and Joint Cost EDP)
     plot_comparative_overlay(group_data, args.output_dir)
     plot_pareto_frontier(group_data, args.output_dir)
+    plot_3d_pareto_frontier(group_data, args.output_dir)
+    plot_joint_cost_pareto_frontier(group_data, args.output_dir)
 
     # Paired Hypothesis Analysis if at least 2 groups exist
     labels = list(group_data.keys())
