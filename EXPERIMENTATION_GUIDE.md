@@ -51,7 +51,12 @@ Clients are deterministically assigned one of 4 standard hardware tiers at start
 * $\text{Transmission Latency } t_{\text{trans}} = \frac{\text{Model Size (bits)}}{r_{\text{trans}}}$
 * $\text{Transmission Energy } E_{\text{trans}} = t_{\text{trans}} \times P_{\text{tx}}$
 
+> [!NOTE]
+> **Implementation Note on Client Selection Probability ($p_i$) Normalization in Early Rounds ($t < W$)**:
+> Client selection probability $p_i$ (Feature 7 of $X_t$) is normalized by actual accumulated selections made across available history, $k \cdot \min(t, W)$, where $t$ is current round and $W=10$ is the entropy trailing window. For early rounds $t < W$, this ensures correct scaling ($\sum_{i=1}^N p_i = 1.0$) from Round 1 onward without early scaling distortion.
+
 ---
+
 
 ## 2. Rounds Calibration Protocol ($T = 1.5 T_0$)
 

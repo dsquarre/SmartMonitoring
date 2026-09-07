@@ -421,7 +421,11 @@ class DQNAgent(BaseRLAgent):
 
 def compute_client_selection_probabilities(selection_history: List[List[str]], client_ids: List[str], window_size: int = 10) -> Dict[str, float]:
     """
-    Computes individual client selection probabilities p_i = n_i / (kW) over trailing window W of rounds.
+    Computes individual client selection probabilities p_i = n_i / (k * min(t, W)) over trailing window min(t, W) of rounds.
+
+    Footnote / Implementation Note:
+    For early rounds t < W before W rounds have elapsed, p_i is normalized by actual total selections made so far,
+    k * min(t, W), ensuring sum_i p_i = 1.0 from Round 1 onward without early scaling distortion.
     """
     if not selection_history or not client_ids:
         return {cid: 0.0 for cid in client_ids}
@@ -438,6 +442,7 @@ def compute_client_selection_probabilities(selection_history: List[List[str]], c
                 counts[cid] += 1
 
     return {cid: float(counts[cid] / float(total_selections)) for cid in client_ids}
+
 
 
 def compute_selection_diversity(selection_history: List[List[str]], client_ids: List[str], window_size: int = 10) -> float:
