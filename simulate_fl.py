@@ -169,6 +169,21 @@ def run_simulation(args):
     selector = get_selector_by_name(args.selector, env=env, gamma=args.gamma)
     aggregator = get_aggregator_by_name(args.aggregator)
 
+    if getattr(args, "load_selector", None):
+        if os.path.exists(args.load_selector):
+            if hasattr(selector, "load_selector"):
+                selector.load_selector(args.load_selector)
+                print(f"[Selector CLI] Successfully loaded selector parameters from {args.load_selector}")
+            else:
+                print(f"[Selector Warning] Selector '{args.selector}' does not support loading parameters.")
+        else:
+            raise FileNotFoundError(f"Specified load-selector file not found: {args.load_selector}")
+
+    if getattr(args, "freeze_selector", False):
+        if hasattr(selector, "freeze"):
+            selector.freeze()
+            print(f"[Selector CLI] Selector policy frozen! No weight updates will occur during simulation.")
+
     # 4. Initialize Global Model
     global_model_path = os.path.join(tmp_model_dir, "global_model.keras")
     initial_server_model = ServerModel()
@@ -499,6 +514,13 @@ def run_simulation(args):
     if os.path.exists(tmp_model_dir):
         shutil.rmtree(tmp_model_dir)
 
+    if getattr(args, "save_selector", None):
+        if hasattr(selector, "save_selector"):
+            selector.save_selector(args.save_selector)
+            print(f"[Selector CLI] Saved trained selector parameters to {args.save_selector}")
+        else:
+            print(f"[Selector Warning] Selector '{args.selector}' does not support saving parameters.")
+
     print("\n" + "=" * 60)
     print(f" Research Simulation Completed Successfully! ")
     print(f" Logs & Plots saved to: {os.path.abspath(args.output_dir)}")
@@ -527,6 +549,9 @@ if __name__ == "__main__":
     parser.add_argument("--w-lat", type=float, default=1.0, help="Latency penalty weight w_L (default: 1.0)")
     parser.add_argument("--w-eng", type=float, default=1.0, help="Energy penalty weight w_E (default: 1.0)")
     parser.add_argument("--accuracy-only", action="store_true", help="Set latency and energy weights to 0.0 (accuracy-only optimization)")
+    parser.add_argument("--save-selector", type=str, default=None, help="File path to save trained selector parameters (e.g. trained_selector.npz)")
+    parser.add_argument("--load-selector", type=str, default=None, help="File path to load pre-trained selector parameters")
+    parser.add_argument("--freeze-selector", action="store_true", help="Freeze loaded selector policy (no parameter updates during evaluation)")
 
     parsed_args = parser.parse_args()
 

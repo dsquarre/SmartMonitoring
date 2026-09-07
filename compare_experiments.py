@@ -202,7 +202,7 @@ def perform_paired_hypothesis_testing(group_A_name, group_A_data, group_B_name, 
 
 def plot_comparative_overlay(group_data, output_dir):
     """Generates comparative overlay plots with shaded error bands across strategies."""
-    colors = ['crimson', 'royalblue', 'forestgreen', 'darkorange', 'purple', 'teal']
+    colors = ['crimson', 'royalblue', 'forestgreen', 'darkorange', 'purple', 'teal', 'magenta', 'chocolate', 'navy', 'olive']
 
     # 1. Overlay Loss vs Round
     plt.figure(figsize=(9, 5.5))
@@ -273,7 +273,7 @@ def plot_pareto_frontier(group_data, output_dir):
     Plots Pareto Frontier Tradeoff Scatter Graphs (Accuracy vs Energy, Accuracy vs Latency)
     with 95% Confidence Intervals and Standard Error bars across multi-seed runs.
     """
-    colors = ['crimson', 'royalblue', 'forestgreen', 'darkorange', 'purple', 'teal']
+    colors = ['crimson', 'royalblue', 'forestgreen', 'darkorange', 'purple', 'teal', 'magenta', 'chocolate', 'navy', 'olive']
 
     for cost_metric_key, cost_label, filename_suffix in [
         ("energy", "Cumulative System Energy (Joules)", "energy"),
@@ -355,7 +355,7 @@ def plot_3d_pareto_frontier(group_data, output_dir):
     Y-axis: Cumulative Energy (J)
     Z-axis: Final F2 Score Accuracy
     """
-    colors = ['crimson', 'royalblue', 'forestgreen', 'darkorange', 'purple', 'teal']
+    colors = ['crimson', 'royalblue', 'forestgreen', 'darkorange', 'purple', 'teal', 'magenta', 'chocolate', 'navy', 'olive']
     fig = plt.figure(figsize=(10, 7.5))
     ax = fig.add_subplot(111, projection='3d')
 
@@ -406,7 +406,7 @@ def plot_joint_cost_pareto_frontier(group_data, output_dir):
     Plots F2 Accuracy vs Energy-Delay Product (EDP = Cumulative Energy * Cumulative Latency).
     This captures the joint tradeoff (Accuracy vs Combined Resource Cost) in a unified 2D chart.
     """
-    colors = ['crimson', 'royalblue', 'forestgreen', 'darkorange', 'purple', 'teal']
+    colors = ['crimson', 'royalblue', 'forestgreen', 'darkorange', 'purple', 'teal', 'magenta', 'chocolate', 'navy', 'olive']
     plt.figure(figsize=(9, 6))
     pareto_points = []
 

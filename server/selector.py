@@ -29,6 +29,18 @@ class ClientSelector(ABC):
         """
         pass
 
+    def freeze(self):
+        self.is_frozen = True
+
+    def unfreeze(self):
+        self.is_frozen = False
+
+    def save_selector(self, filepath: str):
+        pass
+
+    def load_selector(self, filepath: str):
+        pass
+
 class RandomClientSelector(ClientSelector):
     """
     Selects k clients uniformly at random from the connected clients.
@@ -52,6 +64,18 @@ class BaseRLAgent(ABC):
         """
         Train the RL agent.
         """
+        pass
+
+    def freeze(self):
+        self.is_frozen = True
+
+    def unfreeze(self):
+        self.is_frozen = False
+
+    def save_state(self, filepath: str):
+        pass
+
+    def load_state(self, filepath: str):
         pass
 
 class RandomRLAgent(BaseRLAgent):
@@ -117,6 +141,10 @@ class LinUCBAgent(BaseRLAgent):
         return selected_indices
 
     def update(self, state: np.ndarray, action: List[int], reward: float, next_state: np.ndarray, context: Dict[str, Any] = None):
+        if getattr(self, "is_frozen", False):
+            print(f"[D-LinUCB Agent] Policy is frozen. Skipping parameter update.")
+            return
+
         context = context or {}
         vector_rewards = context.get("vector_rewards", {})  # Dict[idx, reward]
         
@@ -138,6 +166,36 @@ class LinUCBAgent(BaseRLAgent):
                 self.recompute_inv = True
                 
         print(f"[D-LinUCB Agent] Updated D-LinUCB model parameters (gamma={self.gamma}).")
+
+    def freeze(self):
+        self.is_frozen = True
+
+    def unfreeze(self):
+        self.is_frozen = False
+
+    def save_state(self, filepath: str):
+        np.savez_compressed(
+            filepath,
+            A=self.A,
+            b=self.b,
+            feature_dim=np.array([self.feature_dim], dtype=np.int32),
+            alpha=np.array([self.alpha], dtype=np.float64),
+            gamma=np.array([self.gamma], dtype=np.float64)
+        )
+        print(f"[D-LinUCB Agent] Saved model parameters (A, b) to {filepath}")
+
+    def load_state(self, filepath: str):
+        data = np.load(filepath, allow_pickle=True)
+        self.A = data["A"]
+        self.b = data["b"]
+        if "feature_dim" in data:
+            self.feature_dim = int(data["feature_dim"][0])
+        if "alpha" in data:
+            self.alpha = float(data["alpha"][0])
+        if "gamma" in data:
+            self.gamma = float(data["gamma"][0])
+        self.recompute_inv = True
+        print(f"[D-LinUCB Agent] Loaded model parameters (A, b, feature_dim={self.feature_dim}) from {filepath}")
 
 class WLSTSAgent(BaseRLAgent):
     """
@@ -193,6 +251,10 @@ class WLSTSAgent(BaseRLAgent):
         return selected_indices
 
     def update(self, state: np.ndarray, action: List[int], reward: float, next_state: np.ndarray, context: Dict[str, Any] = None):
+        if getattr(self, "is_frozen", False):
+            print(f"[WLS-TS Agent] Policy is frozen. Skipping parameter update.")
+            return
+
         context = context or {}
         vector_rewards = context.get("vector_rewards", {})
 
@@ -213,6 +275,36 @@ class WLSTSAgent(BaseRLAgent):
                 self.recompute_inv = True
 
         print(f"[WLS-TS Agent] Updated WLS-TS posterior distribution parameters (gamma={self.gamma}).")
+
+    def freeze(self):
+        self.is_frozen = True
+
+    def unfreeze(self):
+        self.is_frozen = False
+
+    def save_state(self, filepath: str):
+        np.savez_compressed(
+            filepath,
+            A=self.A,
+            b=self.b,
+            feature_dim=np.array([self.feature_dim], dtype=np.int32),
+            gamma=np.array([self.gamma], dtype=np.float64),
+            sigma=np.array([self.sigma], dtype=np.float64)
+        )
+        print(f"[WLS-TS Agent] Saved parameters to {filepath}")
+
+    def load_state(self, filepath: str):
+        data = np.load(filepath, allow_pickle=True)
+        self.A = data["A"]
+        self.b = data["b"]
+        if "feature_dim" in data:
+            self.feature_dim = int(data["feature_dim"][0])
+        if "gamma" in data:
+            self.gamma = float(data["gamma"][0])
+        if "sigma" in data:
+            self.sigma = float(data["sigma"][0])
+        self.recompute_inv = True
+        print(f"[WLS-TS Agent] Loaded parameters from {filepath}")
 
 class DQNAgent(BaseRLAgent):
     """
@@ -271,6 +363,10 @@ class DQNAgent(BaseRLAgent):
         return selected_indices
 
     def update(self, state: np.ndarray, action: List[int], reward: float, next_state: np.ndarray, context: Dict[str, Any] = None):
+        if getattr(self, "is_frozen", False):
+            print(f"[DQN Agent] Agent is frozen. Skipping parameter update.")
+            return
+
         context = context or {}
         vector_rewards = context.get("vector_rewards", {})
 
@@ -303,6 +399,24 @@ class DQNAgent(BaseRLAgent):
         if self.update_target_counter % 5 == 0:
             self.target_model.set_weights(self.model.get_weights())
             print("[DQN Agent] Updated target network weights.")
+
+    def freeze(self):
+        self.is_frozen = True
+
+    def unfreeze(self):
+        self.is_frozen = False
+
+    def save_state(self, filepath: str):
+        weights = self.model.get_weights()
+        np.savez_compressed(filepath, weights=np.array(weights, dtype=object), feature_dim=np.array([self.feature_dim], dtype=np.int32))
+        print(f"[DQN Agent] Saved model weights to {filepath}")
+
+    def load_state(self, filepath: str):
+        data = np.load(filepath, allow_pickle=True)
+        weights = list(data["weights"])
+        self.model.set_weights(weights)
+        self.target_model.set_weights(weights)
+        print(f"[DQN Agent] Loaded model weights from {filepath}")
 
 
 def compute_selection_diversity(selection_history: List[List[str]], client_ids: List[str], window_size: int = 10) -> float:
@@ -463,6 +577,25 @@ class RLClientSelector(ClientSelector):
         self.client_grad_sim: Dict[str, float] = {}
         self.selection_history: List[List[str]] = []
         self.window_size: int = 10
+        self.is_frozen: bool = False
+
+    def freeze(self):
+        self.is_frozen = True
+        if hasattr(self.agent, "freeze"):
+            self.agent.freeze()
+
+    def unfreeze(self):
+        self.is_frozen = False
+        if hasattr(self.agent, "unfreeze"):
+            self.agent.unfreeze()
+
+    def save_selector(self, filepath: str):
+        if hasattr(self.agent, "save_state"):
+            self.agent.save_state(filepath)
+
+    def load_selector(self, filepath: str):
+        if hasattr(self.agent, "load_state"):
+            self.agent.load_state(filepath)
 
     def select_clients(self, client_ids: List[str], k: int, context: Dict[str, Any] = None) -> List[str]:
         if not client_ids:
@@ -665,11 +798,39 @@ class MetaAggregatorAgent:
         return best_idx, strategy_name
 
     def update(self, global_state: np.ndarray, action_idx: int, reward: float):
+        if getattr(self, "is_frozen", False):
+            print(f"[Meta-Controller Agent] Policy is frozen. Skipping parameter update.")
+            return
+
         clean_state = np.nan_to_num(global_state, nan=0.0, posinf=1e6, neginf=-1e6)
         x = clean_state.reshape(-1, 1)
         self.A[action_idx] = self.gamma * self.A[action_idx] + (1.0 - self.gamma) * np.eye(self.feature_dim, dtype=np.float64) + (x @ x.T)
         self.b[action_idx] = self.gamma * self.b[action_idx] + reward * x
         print(f"[Meta-Controller ({self.mode.upper()})] Updated weights for strategy '{self.STRATEGIES[action_idx]}' (gamma={self.gamma}).")
+
+    def freeze(self):
+        self.is_frozen = True
+
+    def unfreeze(self):
+        self.is_frozen = False
+
+    def save_state(self, filepath: str):
+        np.savez_compressed(
+            filepath,
+            A=np.stack(self.A),
+            b=np.stack(self.b),
+            feature_dim=np.array([self.feature_dim], dtype=np.int32),
+            mode=np.array([self.mode], dtype=object)
+        )
+        print(f"[Meta-Controller Agent] Saved parameters to {filepath}")
+
+    def load_state(self, filepath: str):
+        data = np.load(filepath, allow_pickle=True)
+        self.A = [data["A"][i].astype(np.float64) for i in range(len(data["A"]))]
+        self.b = [data["b"][i].astype(np.float64) for i in range(len(data["b"]))]
+        if "feature_dim" in data:
+            self.feature_dim = int(data["feature_dim"][0])
+        print(f"[Meta-Controller Agent] Loaded parameters from {filepath}")
 
 
 class HierarchicalFLSelector(ClientSelector):
@@ -706,6 +867,53 @@ class HierarchicalFLSelector(ClientSelector):
         self.loss_delta_history: List[float] = []
         self.rounds_since_last_switch: int = 0
         self.window_size: int = 10
+        self.is_frozen: bool = False
+
+    def freeze(self):
+        self.is_frozen = True
+        if hasattr(self.meta_agent, "freeze"):
+            self.meta_agent.freeze()
+        if hasattr(self.sub_agent, "freeze"):
+            self.sub_agent.freeze()
+
+    def unfreeze(self):
+        self.is_frozen = False
+        if hasattr(self.meta_agent, "unfreeze"):
+            self.meta_agent.unfreeze()
+        if hasattr(self.sub_agent, "unfreeze"):
+            self.sub_agent.unfreeze()
+
+    def save_selector(self, filepath: str):
+        meta_A = np.stack(self.meta_agent.A)
+        meta_b = np.stack(self.meta_agent.b)
+        meta_dim = np.array([self.meta_agent.feature_dim], dtype=np.int32)
+        sub_A = self.sub_agent.A
+        sub_b = self.sub_agent.b
+        sub_dim = np.array([self.sub_agent.feature_dim], dtype=np.int32)
+
+        np.savez_compressed(
+            filepath,
+            meta_A=meta_A,
+            meta_b=meta_b,
+            meta_dim=meta_dim,
+            sub_A=sub_A,
+            sub_b=sub_b,
+            sub_dim=sub_dim
+        )
+        print(f"[HierarchicalFLSelector] Saved combined selector parameters to {filepath}")
+
+    def load_selector(self, filepath: str):
+        data = np.load(filepath, allow_pickle=True)
+        if "meta_A" in data:
+            self.meta_agent.A = [data["meta_A"][i].astype(np.float64) for i in range(len(data["meta_A"]))]
+            self.meta_agent.b = [data["meta_b"][i].astype(np.float64) for i in range(len(data["meta_b"]))]
+            self.meta_agent.feature_dim = int(data["meta_dim"][0])
+        if "sub_A" in data:
+            self.sub_agent.A = data["sub_A"].astype(np.float64)
+            self.sub_agent.b = data["sub_b"].astype(np.float64)
+            self.sub_agent.feature_dim = int(data["sub_dim"][0])
+            self.sub_agent.recompute_inv = True
+        print(f"[HierarchicalFLSelector] Loaded combined selector parameters from {filepath}")
 
     def select_clients(self, client_ids: List[str], k: int, context: Dict[str, Any] = None) -> List[str]:
         if not client_ids:
