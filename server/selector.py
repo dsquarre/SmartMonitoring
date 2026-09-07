@@ -572,9 +572,14 @@ class RLClientSelector(ClientSelector):
             global_acc_delta = round_summary.get("global_acc_delta", global_loss_delta)
             tot_eng = round_summary.get("total_round_energy", 0.0)
             avg_lat = round_summary.get("avg_comp_latency", 0.0)
+            w_loss = float(round_summary.get("w_loss", 1.0))
+            w_L = float(round_summary.get("w_lat", 1.0))
+            w_E = float(round_summary.get("w_eng", 1.0))
+            w_acc = float(round_summary.get("w_acc", 10.0))
             c_rewards, reward, _ = self.env.calculate_vector_rewards(
                 self.last_client_ids, selected_ids, selected_metrics,
                 global_loss_delta, client_losses, self.client_staleness,
+                w_loss=w_loss, w_L=w_L, w_E=w_E, w_acc=w_acc,
                 global_acc_delta=global_acc_delta, total_round_energy=tot_eng, round_latency=avg_lat
             )
             vector_rewards = {i: c_rewards[cid] for i, cid in enumerate(self.last_client_ids) if cid in c_rewards}
@@ -910,9 +915,14 @@ class HierarchicalFLSelector(ClientSelector):
             global_acc_delta = round_summary.get("global_acc_delta", global_loss_delta)
             tot_eng = round_summary.get("total_round_energy", 0.0)
             avg_lat = round_summary.get("avg_comp_latency", 0.0)
+            w_loss = float(round_summary.get("w_loss", 1.0))
+            w_L = float(round_summary.get("w_lat", 1.0))
+            w_E = float(round_summary.get("w_eng", 1.0))
+            w_acc = float(round_summary.get("w_acc", 10.0))
             c_rewards, scalar_reward, meta_reward = self.env.calculate_vector_rewards(
                 self.last_client_ids, selected_ids, selected_metrics,
                 global_loss_delta, client_losses, self.client_staleness,
+                w_loss=w_loss, w_L=w_L, w_E=w_E, w_acc=w_acc,
                 global_acc_delta=global_acc_delta, total_round_energy=tot_eng, round_latency=avg_lat
             )
             vector_rewards = {i: c_rewards[cid] for i, cid in enumerate(self.last_client_ids) if cid in c_rewards}

@@ -73,31 +73,31 @@ class FederatedEnv:
             "E_total": E_train + E_trans
         }
 
-    def calculate_meta_reward(self, global_acc_delta: float, total_round_energy: float, round_latency: float) -> float:
+    def calculate_meta_reward(self, global_acc_delta: float, total_round_energy: float, round_latency: float,
+                              w_acc: float = 10.0, w_L: float = 1.0, w_E: float = 1.0) -> float:
         """
-        Meta-Aggregator Reward r_t = 0.5 * (tanh(10 * z_W(ΔAcc_t) - z_W(E_t) - z_W(L_t)) + 1)
+        Meta-Aggregator Reward r_t = 0.5 * (tanh(w_acc * z_W(ΔAcc_t) - w_E * z_W(E_t) - w_L * z_W(L_t)) + 1)
         """
         z_acc_delta = self.acc_delta_normalizer.normalize(global_acc_delta)
         z_eng = self.global_eng_normalizer.normalize(total_round_energy)
         z_lat = self.global_lat_normalizer.normalize(round_latency)
 
-        raw_r = 10.0 * z_acc_delta - z_eng - z_lat
+        raw_r = (w_acc * z_acc_delta) - (w_E * z_eng) - (w_L * z_lat)
         return float(0.5 * (np.tanh(raw_r) + 1.0))
 
     def calculate_reward(self, selected_metrics, global_loss_delta, local_losses, 
                          w_perf=10.0, w_local=1.0, w_lat=0.1, w_eng=1.0, w_fair=0.5):
         max_latency = max(m["t_total"] for m in selected_metrics.values()) if selected_metrics else 0.0
         total_energy = sum(m["E_total"] for m in selected_metrics.values()) if selected_metrics else 0.0
-        avg_local_loss = np.mean(local_losses) if local_losses else 1.0
-
         return self.calculate_meta_reward(global_loss_delta, total_energy, max_latency)
 
     def calculate_vector_rewards(self, client_ids, selected_ids, selected_metrics, global_loss_delta, 
                                  client_losses, staleness_dict=None,
-                                 w_L=1.0, w_E=1.0, w_stale=0.05, global_acc_delta=None,
+                                 w_loss: float = 1.0, w_L: float = 1.0, w_E: float = 1.0, w_stale: float = 0.05,
+                                 w_acc: float = 10.0, global_acc_delta=None,
                                  total_round_energy=None, round_latency=None):
         """
-        Calculates per-client sub-controller reward r_{t, i} = 0.5 * (tanh(z_W(loss) - w_L * z_W(lat) - w_E * z_W(eng)) + 1)
+        Calculates per-client sub-controller reward r_{t, i} = 0.5 * (tanh(w_loss * z_W(loss) - w_L * z_W(lat) - w_E * z_W(eng)) + 1)
         and meta-aggregator reward r_t.
         """
         staleness_dict = staleness_dict or {}
@@ -112,7 +112,7 @@ class FederatedEnv:
                 z_lat = self.lat_normalizer.normalize(m.get("t_total", 0.0))
                 z_eng = self.eng_normalizer.normalize(m.get("E_total", 0.0))
 
-                raw_r = z_loss - (w_L * z_lat) - (w_E * z_eng)
+                raw_r = (w_loss * z_loss) - (w_L * z_lat) - (w_E * z_eng)
                 r_i = 0.5 * (np.tanh(raw_r) + 1.0)
             else:
                 stale_rounds = staleness_dict.get(cid, 0)
@@ -123,11 +123,13 @@ class FederatedEnv:
         scalar_reward = float(np.mean(list(client_rewards.values()))) if client_rewards else 0.5
 
         if global_acc_delta is not None and total_round_energy is not None and round_latency is not None:
-            meta_reward = self.calculate_meta_reward(global_acc_delta, total_round_energy, round_latency)
+            meta_reward = self.calculate_meta_reward(global_acc_delta, total_round_energy, round_latency,
+                                                     w_acc=w_acc, w_L=w_L, w_E=w_E)
         else:
             tot_eng = sum(m.get("E_total", 0.0) for m in selected_metrics.values()) if selected_metrics else 0.0
             max_lat = max(m.get("t_total", 0.0) for m in selected_metrics.values()) if selected_metrics else 0.0
-            meta_reward = self.calculate_meta_reward(global_loss_delta, tot_eng, max_lat)
+            meta_reward = self.calculate_meta_reward(global_loss_delta, tot_eng, max_lat,
+                                                     w_acc=w_acc, w_L=w_L, w_E=w_E)
 
         return client_rewards, scalar_reward, meta_reward
 

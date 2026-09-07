@@ -49,7 +49,7 @@ class TestRunningNormalizer(unittest.TestCase):
         }
         client_losses = {"client_0": 0.5}
         
-        c_rewards, scalar_r = env.calculate_vector_rewards(
+        c_rewards, scalar_r, meta_r = env.calculate_vector_rewards(
             client_ids, selected_ids, selected_metrics, 
             global_loss_delta=0.1, client_losses=client_losses
         )

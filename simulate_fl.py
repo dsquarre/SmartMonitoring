@@ -299,7 +299,7 @@ def run_simulation(args):
             print(f"[GradSim Warning] Could not calculate gradient similarities: {e}")
 
         # Check Training Response Threshold tau_train = 0.5 * K
-        tau_train = 0.5 * k
+        tau_train = 0.5 * args.select_k
         n_responding_train = len(client_data)
 
         if n_responding_train < tau_train:
@@ -357,7 +357,7 @@ def run_simulation(args):
         tf.keras.backend.clear_session()
 
         # Check Evaluation Response Threshold tau_eval = 0.5 * N
-        tau_eval = 0.5 * n_clients
+        tau_eval = 0.5 * args.num_clients
         n_responding_eval = len(eval_results)
 
         if dropped_training or n_responding_eval < tau_eval:
@@ -444,6 +444,10 @@ def run_simulation(args):
         # Update Client Selector Policy (RL / Contextual Bandits)
         prev_loss = round_history[-2]["loss"] if len(round_history) > 1 else round_metrics["loss"]
         global_loss_delta = prev_loss - round_metrics["loss"]
+
+        prev_acc = round_history[-2]["accuracy"] if len(round_history) > 1 else 0.0
+        global_acc_delta = round_metrics.get("accuracy", 0.0) - prev_acc
+
         client_accuracies = {ev["client_id"]: float(ev["metrics"].get("accuracy", 0.0)) for ev in eval_results}
 
         round_summary = {
@@ -458,6 +462,11 @@ def run_simulation(args):
             "client_accuracies": client_accuracies,
             "global_accuracy": round_metrics.get("accuracy", 0.0),
             "global_loss_delta": global_loss_delta,
+            "global_acc_delta": global_acc_delta,
+            "w_loss": getattr(args, "w_loss", 1.0),
+            "w_lat": getattr(args, "w_lat", 1.0),
+            "w_eng": getattr(args, "w_eng", 1.0),
+            "w_acc": getattr(args, "w_acc", 10.0),
             "local_losses": [client_losses[cid] for cid in selected_ids],
             "elapsed_round": elapsed_round,
             "avg_comp_latency": round_metrics.get("avg_comp_latency", 0.0),
@@ -513,8 +522,18 @@ if __name__ == "__main__":
                         help="Output directory for metrics and plots")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("-g", "--gamma", type=float, default=0.95, help="Discount factor gamma in (0, 1.0]. Set 1.0 for undiscounted RL (default: 0.95)")
+    parser.add_argument("--w-loss", type=float, default=1.0, help="Sub-controller loss weight w_loss (default: 1.0)")
+    parser.add_argument("--w-acc", type=float, default=10.0, help="Meta-controller accuracy weight w_acc (default: 10.0)")
+    parser.add_argument("--w-lat", type=float, default=1.0, help="Latency penalty weight w_L (default: 1.0)")
+    parser.add_argument("--w-eng", type=float, default=1.0, help="Energy penalty weight w_E (default: 1.0)")
+    parser.add_argument("--accuracy-only", action="store_true", help="Set latency and energy weights to 0.0 (accuracy-only optimization)")
 
     parsed_args = parser.parse_args()
+
+    if parsed_args.accuracy_only:
+        parsed_args.w_lat = 0.0
+        parsed_args.w_eng = 0.0
+        print("[Objective Mode] Accuracy-Only mode enabled: w_lat=0.0, w_eng=0.0")
 
     # Dynamic K calculation if --select-k was not provided explicitly
     if parsed_args.select_k is None:

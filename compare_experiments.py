@@ -268,6 +268,86 @@ def plot_comparative_overlay(group_data, output_dir):
     plt.close()
 
 
+def plot_pareto_frontier(group_data, output_dir):
+    """
+    Plots Pareto Frontier Tradeoff Scatter Graphs (Accuracy vs Energy, Accuracy vs Latency)
+    with 95% Confidence Intervals and Standard Error bars across multi-seed runs.
+    """
+    colors = ['crimson', 'royalblue', 'forestgreen', 'darkorange', 'purple', 'teal']
+
+    for cost_metric_key, cost_label, filename_suffix in [
+        ("energy", "Cumulative System Energy (Joules)", "energy"),
+        ("latency", "Cumulative Completion Latency (Seconds)", "latency")
+    ]:
+        plt.figure(figsize=(9, 6))
+        pareto_points = []
+
+        for i, (label, data) in enumerate(group_data.items()):
+            color = colors[i % len(colors)]
+            raw_runs = data["raw_runs"]
+
+            x_vals = []
+            y_vals = []
+            for run in raw_runs:
+                if not run:
+                    continue
+                if cost_metric_key == "energy":
+                    c_val = sum(r.get("total_round_energy", 0.0) for r in run)
+                else:
+                    c_val = sum(r.get("avg_comp_latency", 0.0) for r in run)
+
+                acc_val = run[-1].get("f2", run[-1].get("accuracy", 0.0))
+                x_vals.append(c_val)
+                y_vals.append(acc_val)
+
+            if not x_vals:
+                continue
+
+            x_arr = np.array(x_vals)
+            y_arr = np.array(y_vals)
+
+            x_mean = float(np.mean(x_arr))
+            y_mean = float(np.mean(y_arr))
+
+            n_samples = len(x_arr)
+            if n_samples > 1:
+                x_err = float(np.std(x_arr) / np.sqrt(n_samples)) * 1.96
+                y_err = float(np.std(y_arr) / np.sqrt(n_samples)) * 1.96
+            else:
+                x_err = 0.0
+                y_err = 0.0
+
+            plt.scatter(x_arr, y_arr, color=color, alpha=0.35, s=40)
+            plt.errorbar(x_mean, y_mean, xerr=x_err, yerr=y_err, fmt='s', color=color,
+                         markersize=9, capsize=6, linewidth=2, label=f"{label} (Mean ± 95% CI)")
+
+            pareto_points.append((x_mean, y_mean, label, color))
+
+        if len(pareto_points) > 1:
+            pareto_points.sort(key=lambda pt: pt[0])
+            frontier_x = []
+            frontier_y = []
+            max_y = -np.inf
+
+            for x, y, _, _ in pareto_points:
+                if y > max_y:
+                    frontier_x.append(x)
+                    frontier_y.append(y)
+                    max_y = y
+
+            if len(frontier_x) > 1:
+                plt.plot(frontier_x, frontier_y, 'k--', linewidth=1.8, label="Empirical Pareto Frontier")
+
+        plt.xlabel(cost_label, fontsize=11)
+        plt.ylabel("Final F2 Score (Primary Accuracy)", fontsize=11)
+        plt.title(f"Pareto Tradeoff: F2 Accuracy vs {cost_label.split()[0]} (Multi-Seed)", fontsize=12)
+        plt.legend(loc="lower right")
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, f"comparison_pareto_accuracy_vs_{filename_suffix}.png"), dpi=300)
+        plt.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Comparative Metrics & Paired Hypothesis Analysis")
     parser.add_argument("--dirs", nargs="+", required=True, help="Run directories or glob patterns")
@@ -296,8 +376,9 @@ def main():
         print("[Error] Failed to load metrics from directories.")
         sys.exit(1)
 
-    # Plot overlay curves
+    # Plot overlay curves and Pareto frontier
     plot_comparative_overlay(group_data, args.output_dir)
+    plot_pareto_frontier(group_data, args.output_dir)
 
     # Paired Hypothesis Analysis if at least 2 groups exist
     labels = list(group_data.keys())
