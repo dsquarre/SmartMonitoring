@@ -17,7 +17,7 @@ class TestHierarchicalRL(unittest.TestCase):
             3: {"cpu_frequency": 1.0e9, "tx_power": 0.4, "r_trans": 5e6},
         }
         self.env = FederatedEnv(self.profiles)
-        self.meta_agent = MetaAggregatorAgent(alpha=0.5, feature_dim=5)
+        self.meta_agent = MetaAggregatorAgent(alpha=0.5, feature_dim=20)
         # Note: Sub-agent receives 14 features (7 base + 7 one-hot aggregation modes)
         self.sub_agent = LinUCBAgent(alpha=1.0, feature_dim=14)
         self.selector = HierarchicalFLSelector(

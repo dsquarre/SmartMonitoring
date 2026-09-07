@@ -55,7 +55,7 @@ class TestDQNSelector(unittest.TestCase):
         self.assertGreater(len(dqn_agent_7d.replay_buffer), 0)
 
     def test_hierarchical_dqn_selector(self):
-        meta_agent = MetaAggregatorAgent(alpha=0.5, feature_dim=5)
+        meta_agent = MetaAggregatorAgent(alpha=0.5, feature_dim=20)
         dqn_agent_14d = DQNAgent(feature_dim=14, hidden_dim=16, lr=0.001)
         
         selector = HierarchicalFLSelector(

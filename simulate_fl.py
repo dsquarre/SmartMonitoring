@@ -349,18 +349,24 @@ def run_simulation(args):
         # Update Client Selector Policy (RL / Contextual Bandits)
         prev_loss = round_history[-2]["loss"] if len(round_history) > 1 else round_metrics["loss"]
         global_loss_delta = prev_loss - round_metrics["loss"]
+        client_accuracies = {ev["client_id"]: float(ev["metrics"].get("accuracy", 0.0)) for ev in eval_results}
 
         round_summary = {
             "round": r,
             "rounds_left": rounds_left,
+            "select_k": args.select_k,
             "selected_ids": selected_ids,
             "active_clients": client_ids,
             "client_id_map": client_id_map,
             "client_samples": client_samples,
             "client_losses": client_losses,
+            "client_accuracies": client_accuracies,
+            "global_accuracy": round_metrics.get("accuracy", 0.0),
             "global_loss_delta": global_loss_delta,
             "local_losses": [client_losses[cid] for cid in selected_ids],
             "elapsed_round": elapsed_round,
+            "avg_comp_latency": round_metrics.get("avg_comp_latency", 0.0),
+            "total_round_energy": round_metrics.get("total_round_energy", 0.0),
             "client_roundtrips": {cid: elapsed_round for cid in selected_ids},
             "client_latencies": {cid: latencies[i] for i, cid in enumerate(selected_ids)},
             "client_energies": {cid: energies[i] for i, cid in enumerate(selected_ids)},
