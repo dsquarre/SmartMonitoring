@@ -417,6 +417,33 @@ def build_base_client_features(
     return np.nan_to_num(raw_state, nan=0.0, posinf=1e6, neginf=-1e6)
 
 
+def build_oort_client_features(
+    client_ids: List[str],
+    context: Dict[str, Any],
+    client_ema_loss: Dict[str, float],
+    client_ema_latency: Dict[str, float],
+    client_ema_energy: Dict[str, float],
+    client_staleness: Dict[str, int]
+) -> np.ndarray:
+    """
+    Builds N x 4 Oort-style feature matrix for clients:
+    [EMA_client_loss, EMA_client_latency, EMA_client_energy, stale_count]
+    Defaults unobserved loss, latency, energy, staleness to float('inf') / np.inf.
+    """
+    client_losses = context.get("client_losses", {})
+    state_list = []
+    for cid in client_ids:
+        c_loss = float(client_ema_loss.get(cid, float(client_losses.get(cid, np.inf))))
+        lat = float(client_ema_latency.get(cid, np.inf))
+        eng = float(client_ema_energy.get(cid, np.inf))
+        staleness = float(client_staleness.get(cid, np.inf))
+
+        state_list.append([c_loss, lat, eng, staleness])
+
+    raw_state = np.array(state_list, dtype=np.float32)
+    return np.nan_to_num(raw_state, nan=0.0, posinf=1e6, neginf=-1e6)
+
+
 class RLClientSelector(ClientSelector):
     def __init__(self, agent: BaseRLAgent, env: Any):
         self.agent = agent
@@ -910,10 +937,52 @@ class HierarchicalFLSelector(ClientSelector):
         self.sub_agent.update(self.last_client_state, self.last_action, scalar_reward, next_state, context=next_context)
 
 
+class OortHierarchicalFLSelector(HierarchicalFLSelector):
+    """
+    Oort-Style Simple State Hierarchical Selector:
+    Level 1: MetaAggregatorAgent selects 1 of 7 Aggregation Strategies using 4-dim G_t state vector:
+             [EMA global loss, EMA global latency, EMA global energy, round progress].
+    Level 2: LinUCBAgent selects Top-K Clients using 11-dim X_t state vector:
+             [EMA client_loss_i, EMA client_lat_i, EMA client_eng_i, stale_count_i] + 7-dim one-hot action.
+    """
+    def __init__(self, meta_agent: MetaAggregatorAgent = None, sub_agent: LinUCBAgent = None, env: Any = None):
+        meta_agent = meta_agent or MetaAggregatorAgent(feature_dim=4)
+        sub_agent = sub_agent or LinUCBAgent(feature_dim=11)
+        super().__init__(meta_agent=meta_agent, sub_agent=sub_agent, env=env)
+
+    def _build_global_state(self, context: Dict[str, Any]) -> np.ndarray:
+        current_r = context.get("round", 1)
+        total_r = max(1, current_r + context.get("rounds_left", 10))
+        progress = float(current_r / total_r)
+
+        ema_loss = float(self.ema_global_loss)
+        ema_lat = float(self.ema_global_lat)
+        ema_eng = float(self.ema_global_eng)
+
+        raw_global = np.array([ema_loss, ema_lat, ema_eng, progress], dtype=np.float32)
+        return np.nan_to_num(raw_global, nan=0.0, posinf=1e6, neginf=-1e6)
+
+    def _build_conditioned_client_state(self, client_ids: List[str], agg_idx: int, context: Dict[str, Any]) -> np.ndarray:
+        base_state = build_oort_client_features(
+            client_ids, context,
+            self.client_ema_loss,
+            self.client_ema_latency, self.client_ema_energy,
+            self.client_staleness
+        )
+
+        one_hot_agg = [0.0] * len(MetaAggregatorAgent.STRATEGIES)
+        if 0 <= agg_idx < len(one_hot_agg):
+            one_hot_agg[agg_idx] = 1.0
+
+        one_hot_matrix = np.tile(one_hot_agg, (len(client_ids), 1))
+        conditioned_state = np.hstack([base_state, one_hot_matrix])
+        return conditioned_state.astype(np.float32)
+
+
 def get_selector_by_name(name: str, **kwargs) -> ClientSelector:
     """
     Factory function returning an instance of the requested ClientSelector strategy.
-    Supported names: 'random' (default), 'linucb' / 'd-linucb', 'wls-ts' / 'thompson', 'dqn', 'hierarchical'
+    Supported names: 'random' (default), 'linucb' / 'd-linucb', 'wls-ts' / 'thompson', 'dqn', 'hierarchical', 'oort'
     """
     name_lower = (name or "random").lower()
     if name_lower == "random":
@@ -928,16 +997,21 @@ def get_selector_by_name(name: str, **kwargs) -> ClientSelector:
         feature_dim = kwargs.get("feature_dim", 7)
         agent = WLSTSAgent(feature_dim=feature_dim)
         return RLClientSelector(agent, env)
-    elif name_lower == "dqn":
+    elif name_lower in ["dqn"]:
         env = kwargs.get("env")
         feature_dim = kwargs.get("feature_dim", 7)
         agent = DQNAgent(feature_dim=feature_dim)
         return RLClientSelector(agent, env)
     elif name_lower == "hierarchical":
         env = kwargs.get("env")
-        meta_agent = kwargs.get("meta_agent") or MetaAggregatorAgent()
+        meta_agent = kwargs.get("meta_agent") or MetaAggregatorAgent(feature_dim=20)
         sub_agent = kwargs.get("sub_agent") or LinUCBAgent(feature_dim=14)
         return HierarchicalFLSelector(meta_agent=meta_agent, sub_agent=sub_agent, env=env)
+    elif name_lower in ["oort", "oort_hierarchical", "simple_hierarchical"]:
+        env = kwargs.get("env")
+        meta_agent = kwargs.get("meta_agent") or MetaAggregatorAgent(feature_dim=4)
+        sub_agent = kwargs.get("sub_agent") or LinUCBAgent(feature_dim=11)
+        return OortHierarchicalFLSelector(meta_agent=meta_agent, sub_agent=sub_agent, env=env)
     else:
         print(f"[Selector Warning] Unknown selector strategy '{name}'. Defaulting to RandomClientSelector.")
         return RandomClientSelector()
