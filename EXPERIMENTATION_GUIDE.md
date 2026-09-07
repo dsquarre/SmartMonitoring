@@ -53,27 +53,46 @@ Clients are deterministically assigned one of 4 standard hardware tiers at start
 
 ---
 
-## 2. 30-Seed Hypothesis Testing Workflows
+## 2. Rounds Calibration Protocol ($T = 1.5 T_0$)
 
-The following bash commands run 30 distinct seeds (`42` to `71`) and execute paired $t$-tests and Wilcoxon signed-rank tests for:
+Before running 30-seed hypothesis experiments, calibrate the optimal federated round budget $T$:
+1. **Run Full-Participation Baseline Baseline**: Execute FedAvg with $N=100$ clients and full participation $K=100$ across an initial 50 rounds:
+   ```bash
+   conda run -n web python simulate_fl.py --data-dir data/iid -n 100 -k 100 -r 50 -a fedavg -o results/to_calibration
+   ```
+2. **Execute $T_0$ Calibration Script**: Detect the plateau round $T_0$ (where the $F_2$ accuracy curve stabilizes over 10+ consecutive rounds) and compute $T = \lceil 1.5 \times T_0 \rceil$:
+   ```bash
+   conda run -n web python calibrate_t0.py --metrics results/to_calibration/metrics.csv
+   ```
+3. **Set $T$ Environment Variable**: Use the calibrated $T$ (e.g. `T=45` if $T_0=30$) in all subsequent 30-seed hypothesis runs.
+
+---
+
+## 3. 30-Seed Hypothesis Testing Workflows ($N=100$)
+
+The following bash commands run 30 distinct seeds (`42` to `71`) with $N=100$ clients and execute paired $t$-tests and Wilcoxon signed-rank tests for:
 1. **Max/Final $F_2$ Accuracy in Round $T$**
 2. **Total Energy across all rounds**
 3. **Total/Average Latency**
 4. **Round to reach 90% Target Accuracy**
+
+*Note: Replace `$T` below with your calibrated round count (e.g., `T=45`).*
 
 ---
 
 ### Hypothesis 1: Proposed Custom State ($G_t, X_t$) vs. Simple Oort-Style State
 
 ```bash
+T=45  # Set from calibrate_t0.py
+
 # 1. Run 30 Seeds for Proposed Custom State (Hierarchical RL)
 for seed in $(seq 42 71); do
-  conda run -n web python simulate_fl.py --data-dir data/iid -n 10 -r 10 --seed $seed -s hierarchical -o results/h1_custom/s${seed}
+  conda run -n web python simulate_fl.py --data-dir data/iid -n 100 -r $T --seed $seed -s hierarchical -o results/h1_custom/s${seed}
 done
 
 # 2. Run 30 Seeds for Simple Oort-Style State (Oort RL)
 for seed in $(seq 42 71); do
-  conda run -n web python simulate_fl.py --data-dir data/iid -n 10 -r 10 --seed $seed -s oort -o results/h1_oort/s${seed}
+  conda run -n web python simulate_fl.py --data-dir data/iid -n 100 -r $T --seed $seed -s oort -o results/h1_oort/s${seed}
 done
 
 # 3. Paired Hypothesis Test & Pareto Comparison
@@ -88,24 +107,26 @@ conda run -n web python compare_experiments.py \
 ### Hypothesis 2: Decoupled Discounted vs. Undiscounted LinUCB/TS
 
 ```bash
+T=45  # Set from calibrate_t0.py
+
 # 1. Both Discounted (gamma_meta=0.95, gamma_sub=0.95)
 for seed in $(seq 42 71); do
-  conda run -n web python simulate_fl.py --data-dir data/iid -n 10 -r 10 --seed $seed -s hierarchical --gamma-meta 0.95 --gamma-sub 0.95 -o results/h2_discount_both/s${seed}
+  conda run -n web python simulate_fl.py --data-dir data/iid -n 100 -r $T --seed $seed -s hierarchical --gamma-meta 0.95 --gamma-sub 0.95 -o results/h2_discount_both/s${seed}
 done
 
 # 2. Level 1 Meta-Controller Discounted Only (gamma_meta=0.95, gamma_sub=1.0)
 for seed in $(seq 42 71); do
-  conda run -n web python simulate_fl.py --data-dir data/iid -n 10 -r 10 --seed $seed -s hierarchical --gamma-meta 0.95 --gamma-sub 1.0 -o results/h2_meta_only/s${seed}
+  conda run -n web python simulate_fl.py --data-dir data/iid -n 100 -r $T --seed $seed -s hierarchical --gamma-meta 0.95 --gamma-sub 1.0 -o results/h2_meta_only/s${seed}
 done
 
 # 3. Level 2 Sub-Controller Discounted Only (gamma_meta=1.0, gamma_sub=0.95)
 for seed in $(seq 42 71); do
-  conda run -n web python simulate_fl.py --data-dir data/iid -n 10 -r 10 --seed $seed -s hierarchical --gamma-meta 1.0 --gamma-sub 0.95 -o results/h2_sub_only/s${seed}
+  conda run -n web python simulate_fl.py --data-dir data/iid -n 100 -r $T --seed $seed -s hierarchical --gamma-meta 1.0 --gamma-sub 0.95 -o results/h2_sub_only/s${seed}
 done
 
 # 4. Both Undiscounted (gamma_meta=1.0, gamma_sub=1.0)
 for seed in $(seq 42 71); do
-  conda run -n web python simulate_fl.py --data-dir data/iid -n 10 -r 10 --seed $seed -s hierarchical --gamma-meta 1.0 --gamma-sub 1.0 -o results/h2_undiscounted_both/s${seed}
+  conda run -n web python simulate_fl.py --data-dir data/iid -n 100 -r $T --seed $seed -s hierarchical --gamma-meta 1.0 --gamma-sub 1.0 -o results/h2_undiscounted_both/s${seed}
 done
 
 # 5. Paired Hypothesis Test & 4-Overlay Comparison
@@ -120,19 +141,21 @@ conda run -n web python compare_experiments.py \
 ### Hypothesis 3: Aggregator Selection is Valuable and Converges (8-Way Comparison)
 
 ```bash
+T=45  # Set from calibrate_t0.py
+
 # Step A: Pre-train and Save Selector over 30 Seeds
 for seed in $(seq 42 71); do
-  conda run -n web python simulate_fl.py --data-dir data/iid -n 10 -r 10 --seed $seed -s linucb --save-selector results/h3_saved_selectors/selector_s${seed}.npz -o results/h3_train/s${seed}
+  conda run -n web python simulate_fl.py --data-dir data/iid -n 100 -r $T --seed $seed -s linucb --save-selector results/h3_saved_selectors/selector_s${seed}.npz -o results/h3_train/s${seed}
 done
 
 # Step B: Run Frozen Selector with Meta-Aggregator & 7 Fixed Aggregators across 30 Seeds
 for seed in $(seq 42 71); do
   # 1. Dynamic Meta-Aggregator + Frozen Selector
-  conda run -n web python simulate_fl.py --data-dir data/iid -n 10 -r 5 --seed $seed -s hierarchical --load-selector results/h3_saved_selectors/selector_s${seed}.npz --freeze-selector -o results/h3_meta/s${seed}
+  conda run -n web python simulate_fl.py --data-dir data/iid -n 100 -r $T --seed $seed -s hierarchical --load-selector results/h3_saved_selectors/selector_s${seed}.npz --freeze-selector -o results/h3_meta/s${seed}
 
   # 2-8. Fixed Aggregators + Frozen Selector
   for agg in fedavg fedprox scaffold krum fedadam fedfv qfedavg; do
-    conda run -n web python simulate_fl.py --data-dir data/iid -n 10 -r 5 --seed $seed -s linucb -a $agg --load-selector results/h3_saved_selectors/selector_s${seed}.npz --freeze-selector -o results/h3_${agg}/s${seed}
+    conda run -n web python simulate_fl.py --data-dir data/iid -n 100 -r $T --seed $seed -s linucb -a $agg --load-selector results/h3_saved_selectors/selector_s${seed}.npz --freeze-selector -o results/h3_${agg}/s${seed}
   done
 done
 
@@ -148,14 +171,16 @@ conda run -n web python compare_experiments.py \
 ### Hypothesis 4: Multi-Objective Pareto vs. Accuracy-Only Objective
 
 ```bash
+T=45  # Set from calibrate_t0.py
+
 # 1. Run 30 Seeds for Multi-Objective Pareto (w_lat=1.0, w_eng=1.0)
 for seed in $(seq 42 71); do
-  conda run -n web python simulate_fl.py --data-dir data/iid -n 10 -r 10 --seed $seed -s hierarchical --w-lat 1.0 --w-eng 1.0 -o results/h4_multiobj/s${seed}
+  conda run -n web python simulate_fl.py --data-dir data/iid -n 100 -r $T --seed $seed -s hierarchical --w-lat 1.0 --w-eng 1.0 -o results/h4_multiobj/s${seed}
 done
 
 # 2. Run 30 Seeds for Accuracy-Only Objective (w_lat=0.0, w_eng=0.0)
 for seed in $(seq 42 71); do
-  conda run -n web python simulate_fl.py --data-dir data/iid -n 10 -r 10 --seed $seed -s hierarchical --accuracy-only -o results/h4_acconly/s${seed}
+  conda run -n web python simulate_fl.py --data-dir data/iid -n 100 -r $T --seed $seed -s hierarchical --accuracy-only -o results/h4_acconly/s${seed}
 done
 
 # 3. Paired Hypothesis Test & Pareto Comparison
@@ -172,14 +197,16 @@ conda run -n web python compare_experiments.py \
 Tests whether cross-conditioning Level 2 client selection ($X_t$) on the chosen aggregator and tracking previous aggregator actions in Level 1 ($G_t$) improves performance compared to running both controllers independently without cross-conditioning.
 
 ```bash
+T=45  # Set from calibrate_t0.py
+
 # 1. Run 30 Seeds for Proposed Conditioned Hierarchical Selector (G_t 20d, X_t 14d)
 for seed in $(seq 42 71); do
-  conda run -n web python simulate_fl.py --data-dir data/iid -n 10 -r 10 --seed $seed -s hierarchical -o results/h5_conditioned/s${seed}
+  conda run -n web python simulate_fl.py --data-dir data/iid -n 100 -r $T --seed $seed -s hierarchical -o results/h5_conditioned/s${seed}
 done
 
 # 2. Run 30 Seeds for Unconditioned / Independent Selector (G_t 12d, X_t 7d)
 for seed in $(seq 42 71); do
-  conda run -n web python simulate_fl.py --data-dir data/iid -n 10 -r 10 --seed $seed -s unconditioned -o results/h5_unconditioned/s${seed}
+  conda run -n web python simulate_fl.py --data-dir data/iid -n 100 -r $T --seed $seed -s unconditioned -o results/h5_unconditioned/s${seed}
 done
 
 # 3. Paired Hypothesis Test & Pareto Comparison
@@ -191,7 +218,7 @@ conda run -n web python compare_experiments.py \
 
 ---
 
-## 3. Generated Analysis Outputs (`compare_experiments.py`)
+## 4. Generated Analysis Outputs (`compare_experiments.py`)
 
 Running `compare_experiments.py` populates the output folder with:
 - **`comparison_loss_overlay.png`**: Mean loss curves with shaded $\pm 1 \text{ stderr}$ confidence bands.
@@ -207,3 +234,4 @@ Running `compare_experiments.py` populates the output folder with:
   4. Total Latency
   5. Round to 90% Target Accuracy
 - **`comparison_summary.csv`**: Aggregated final round metrics per strategy group.
+
