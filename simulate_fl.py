@@ -123,7 +123,48 @@ def plot_metrics(round_history, output_dir):
     print(f"[Research Runner] Metric plots saved to {output_dir}")
 
 
+STANDARD_HARDWARE_PROFILES = [
+    # Tier 1: High-Performance Edge Device (e.g. Workstation / High-End Smartphone)
+    {
+        "tier": "High-Performance",
+        "cpu_frequency": 2.5e9,  # 2.5 GHz
+        "power_draw_w": 8.0,     # 8.0 Watts computation power draw
+        "tx_power": 0.5,         # 0.5 Watts transmit power
+        "r_trans": 25e6,         # 25 Mbps upload bandwidth
+    },
+    # Tier 2: Mid-Range Edge Device (e.g. Standard Phone / Jetson Nano)
+    {
+        "tier": "Mid-Range",
+        "cpu_frequency": 1.8e9,  # 1.8 GHz
+        "power_draw_w": 4.5,     # 4.5 Watts computation power draw
+        "tx_power": 0.3,         # 0.3 Watts transmit power
+        "r_trans": 15e6,         # 15 Mbps upload bandwidth
+    },
+    # Tier 3: Constrained Device (e.g. Mobile Tablet)
+    {
+        "tier": "Constrained",
+        "cpu_frequency": 1.2e9,  # 1.2 GHz
+        "power_draw_w": 2.5,     # 2.5 Watts computation power draw
+        "tx_power": 0.15,        # 0.15 Watts transmit power
+        "r_trans": 8e6,          # 8 Mbps upload bandwidth
+    },
+    # Tier 4: Low-Power Edge IoT Node (e.g. Raspberry Pi Zero / Microcontroller)
+    {
+        "tier": "Low-Power IoT",
+        "cpu_frequency": 0.8e9,  # 0.8 GHz
+        "power_draw_w": 1.2,     # 1.2 Watts computation power draw
+        "tx_power": 0.1,         # 0.1 Watts transmit power
+        "r_trans": 3e6,          # 3 Mbps upload bandwidth
+    }
+]
+
+
 def run_simulation(args):
+    """Executes research FL simulation."""
+    os.makedirs(args.output_dir, exist_ok=True)
+    tmp_model_dir = os.path.join(args.output_dir, "tmp_models")
+    os.makedirs(tmp_model_dir, exist_ok=True)
+
     print("=" * 60)
     print(" SmartMonitoring Decoupled Research Baseline Simulation ")
     print("=" * 60)
@@ -138,31 +179,30 @@ def run_simulation(args):
     print(f" Output Directory  : {args.output_dir}")
     print("=" * 60)
 
-    os.makedirs(args.output_dir, exist_ok=True)
-    tmp_model_dir = os.path.join(args.output_dir, "tmp_models")
-    os.makedirs(tmp_model_dir, exist_ok=True)
-
-    # 1. Discover client data files
+    # 1. Load client data partitions
     client_files = {}
-    for i in range(args.num_clients):
-        cid = f"client_{i}"
-        filename = f"{cid}.npz"
-        filepath = os.path.join(args.data_dir, filename)
-        if not os.path.exists(filepath):
-            raise FileNotFoundError(f"Client dataset file not found: {filepath}")
-        client_files[cid] = filepath
+    for filename in sorted(os.listdir(args.data_dir)):
+        if filename.endswith(".npz"):
+            cid = filename.replace(".npz", "")
+            filepath = os.path.join(args.data_dir, filename)
+            if not os.path.exists(filepath):
+                raise FileNotFoundError(f"Client dataset file not found: {filepath}")
+            client_files[cid] = filepath
 
     client_ids = list(client_files.keys())
     client_id_map = {cid: i for i, cid in enumerate(client_ids)}
 
-    # 2. Build RL Environment profiles
+    # 2. Build RL Environment hardware profiles using fixed random seed
+    profile_rng = random.Random(args.seed)
     profiles = {}
+    f_ref = 2.0e9  # Baseline 2.0 GHz reference CPU frequency
+
     for i in range(100):
-        profiles[i] = {
-            "cpu_frequency": 2.0e9,
-            "tx_power": 0.2,
-            "r_trans": 15e6
-        }
+        # Deterministically assign one of the 4 standard hardware tiers per client
+        p_template = profile_rng.choice(STANDARD_HARDWARE_PROFILES)
+        profiles[i] = dict(p_template)
+
+    print(f"[Hardware Profiles] Seed {args.seed}: Deterministically assigned 4 standard hardware profile tiers across {len(profiles)} clients.")
     env = FederatedEnv(profiles, model_size_bits=10_000_000)
 
     # 3. Instantiate Selector & Aggregator
@@ -236,6 +276,11 @@ def run_simulation(args):
             chunk_cids = selected_ids[idx_start:idx_start + args.batch_clients]
 
             for cid in chunk_cids:
+                num_id = client_id_map[cid]
+                p = profiles.get(num_id, STANDARD_HARDWARE_PROFILES[0])
+                f_client = p.get("cpu_frequency", 2.0e9)
+                p_draw = p.get("power_draw_w", 4.5)
+
                 npz_path = client_files[cid]
                 client_model = ClientModel(npz_path, batch_size=args.batch_size)
                 client_model.model.load_weights(global_model_path)
@@ -244,21 +289,22 @@ def run_simulation(args):
                     # FedFV style gradient-based training
                     t0 = time.time()
                     avg_grads, local_loss = client_model.train_local_gradients_fv()
-                    comp_lat = time.time() - t0
-                    measured_energy = comp_lat * 5.0
-                    num_id = client_id_map[cid]
-                    n_samples = client_samples[cid]
+                    t_wall = time.time() - t0
+                    comp_lat = float(t_wall * (f_ref / f_client))
+                    measured_energy = float(comp_lat * p_draw)
 
+                    n_samples = client_samples[cid]
                     client_losses[cid] = float(local_loss)
                     client_data.append((avg_grads, n_samples, local_loss, num_id, comp_lat, measured_energy))
-                    print(f" Client {cid}: Trained (Gradients) | Loss: {local_loss:.4f} | Latency: {comp_lat:.2f}s")
+                    print(f" Client {cid} [{p['tier']}]: Trained (Gradients) | Loss: {local_loss:.4f} | Latency: {comp_lat:.2f}s | Energy: {measured_energy:.2f}J")
 
                 else:
                     # Weight-based training (FedAvg, FedProx, FedAdam, Krum, SCAFFOLD, etc.)
                     t0 = time.time()
                     client_model.train(epochs=args.local_epochs, verbose=0)
-                    comp_lat = time.time() - t0
-                    measured_energy = comp_lat * 5.0
+                    t_wall = time.time() - t0
+                    comp_lat = float(t_wall * (f_ref / f_client))
+                    measured_energy = float(comp_lat * p_draw)
 
                     eval_res = client_model.evaluate()
                     local_loss = eval_res.get("loss", 1.0)
@@ -269,7 +315,7 @@ def run_simulation(args):
                     n_samples = client_samples[cid]
 
                     client_data.append((local_weights_path, n_samples, local_loss, cid, comp_lat, measured_energy))
-                    print(f" Client {cid}: Trained (Weights) | Loss: {local_loss:.4f} | Accuracy: {eval_res.get('accuracy', 0.0):.4f} | Latency: {comp_lat:.2f}s")
+                    print(f" Client {cid} [{p['tier']}]: Trained (Weights) | Loss: {local_loss:.4f} | Accuracy: {eval_res.get('accuracy', 0.0):.4f} | Latency: {comp_lat:.2f}s | Energy: {measured_energy:.2f}J")
 
                 del client_model
 
