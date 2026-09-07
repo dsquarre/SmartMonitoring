@@ -33,12 +33,21 @@ A concise reference for running Federated Learning experiments, customizing mult
 | `--w-eng` | `1.0` | Energy penalty weight ($w_E$) |
 | `--accuracy-only` | `False` | Disables latency and energy penalties (`w_lat=0.0`, `w_eng=0.0`) |
 
-### Selector Persistence & Policy Freezing
-| Parameter | Default | Description |
-| :--- | :--- | :--- |
-| `--save-selector` | `None` | Saves learned selector state ($A, b$, weights) to a `.npz` file |
-| `--load-selector` | `None` | Loads pre-trained selector parameters from a `.npz` file |
-| `--freeze-selector` | `False` | Freezes policy updates (`update_policy` becomes no-op for weights) |
+### Hardware Profile Tiers & Profile Calculations
+Clients are deterministically assigned one of 4 standard hardware tiers at startup using the `--seed` parameter (`random.Random(seed)`):
+
+| Hardware Tier | CPU Frequency | Power Draw ($P_{\text{draw}}$) | Transmit Power ($P_{\text{tx}}$) | Network Rate ($r_{\text{trans}}$) |
+| :--- | :--- | :--- | :--- | :--- |
+| **Tier 1 (High-Performance)** | 2.5 GHz | 8.0 Watts | 0.5 Watts | 25 Mbps |
+| **Tier 2 (Mid-Range)** | 1.8 GHz | 4.5 Watts | 0.3 Watts | 15 Mbps |
+| **Tier 3 (Constrained)** | 1.2 GHz | 2.5 Watts | 0.15 Watts | 8 Mbps |
+| **Tier 4 (Low-Power IoT)** | 0.8 GHz | 1.2 Watts | 0.1 Watts | 3 Mbps |
+
+**Latency & Energy Formulas**:
+* $\text{Training Latency } t_{\text{comp}} = t_{\text{wall}} \times \left( \frac{2.0 \text{ GHz}}{f_{\text{client}}} \right)$
+* $\text{Training Energy } E_{\text{comp}} = t_{\text{comp}} \times P_{\text{draw}}$
+* $\text{Transmission Latency } t_{\text{trans}} = \frac{\text{Model Size (bits)}}{r_{\text{trans}}}$
+* $\text{Transmission Energy } E_{\text{trans}} = t_{\text{trans}} \times P_{\text{tx}}$
 
 ---
 
