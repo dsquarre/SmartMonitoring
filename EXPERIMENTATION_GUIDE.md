@@ -21,7 +21,7 @@ A concise reference for running Federated Learning experiments, customizing mult
 | Parameter | Options / Default | Description |
 | :--- | :--- | :--- |
 | `-a`, `--aggregator` | `fedavg` (default), `qfedavg`, `fedfv`, `fedadam`, `fedprox`, `krum`, `scaffold` | Global aggregation algorithm |
-| `-s`, `--selector` | `random` (default), `linucb`, `wls-ts`, `dqn`, `hierarchical`, `oort` | Client selection algorithm |
+| `-s`, `--selector` | `random` (default), `linucb`, `wls-ts`, `dqn`, `hierarchical`, `oort`, `unconditioned` | Client selection algorithm (`unconditioned` removes cross-conditioning) |
 | `-g`, `--gamma` | `0.95` (default, range `(0, 1.0]`) | Exponential discount factor. Set `-g 1.0` for undiscounted RL. |
 | `--gamma-meta` | `None` (defaults to `--gamma`) | Level 1 Meta-Aggregator discount factor $\gamma_{\text{meta}}$ |
 | `--gamma-sub` | `None` (defaults to `--gamma`) | Level 2 Sub-controller discount factor $\gamma_{\text{sub}}$ |
@@ -163,6 +163,30 @@ conda run -n web python compare_experiments.py \
   --dirs "results/h4_multiobj/s*" "results/h4_acconly/s*" \
   --labels "Multi-Objective Pareto" "Accuracy-Only Baseline" \
   -o results/hypothesis4_results
+```
+
+---
+
+### Hypothesis 5: Aggregator Conditioning Ablation (Conditioned vs. Independent)
+
+Tests whether cross-conditioning Level 2 client selection ($X_t$) on the chosen aggregator and tracking previous aggregator actions in Level 1 ($G_t$) improves performance compared to running both controllers independently without cross-conditioning.
+
+```bash
+# 1. Run 30 Seeds for Proposed Conditioned Hierarchical Selector (G_t 20d, X_t 14d)
+for seed in $(seq 42 71); do
+  conda run -n web python simulate_fl.py --data-dir data/iid -n 10 -r 10 --seed $seed -s hierarchical -o results/h5_conditioned/s${seed}
+done
+
+# 2. Run 30 Seeds for Unconditioned / Independent Selector (G_t 12d, X_t 7d)
+for seed in $(seq 42 71); do
+  conda run -n web python simulate_fl.py --data-dir data/iid -n 10 -r 10 --seed $seed -s unconditioned -o results/h5_unconditioned/s${seed}
+done
+
+# 3. Paired Hypothesis Test & Pareto Comparison
+conda run -n web python compare_experiments.py \
+  --dirs "results/h5_conditioned/s*" "results/h5_unconditioned/s*" \
+  --labels "Conditioned Hierarchical" "Unconditioned Independent" \
+  -o results/hypothesis5_results
 ```
 
 ---

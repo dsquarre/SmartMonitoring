@@ -1206,10 +1206,81 @@ class OortHierarchicalFLSelector(HierarchicalFLSelector):
         return conditioned_state.astype(np.float32)
 
 
+class UnconditionedHierarchicalFLSelector(HierarchicalFLSelector):
+    """
+    Independent / Unconditioned Hierarchical RL Selector:
+    Level 1: MetaAggregatorAgent selects 1 of 7 Aggregation Strategies using 12-dim G_t state vector
+             (12 base numerical features, NO rounds_since_last_switch and NO one-hot last action).
+    Level 2: LinUCBAgent selects Top-K Clients using 7-dim X_t state vector
+             (7 base client features, NO one-hot aggregator action conditioning).
+    """
+    def __init__(self, meta_agent: MetaAggregatorAgent = None, sub_agent: LinUCBAgent = None, env: Any = None):
+        meta_agent = meta_agent or MetaAggregatorAgent(feature_dim=12)
+        sub_agent = sub_agent or LinUCBAgent(feature_dim=7)
+        super().__init__(meta_agent=meta_agent, sub_agent=sub_agent, env=env)
+
+    def _build_global_state(self, context: Dict[str, Any]) -> np.ndarray:
+        current_r = context.get("round", 1)
+        total_r = max(1, current_r + context.get("rounds_left", 10))
+        progress = float(current_r / total_r)
+
+        ema_loss = float(self.ema_global_loss)
+        ema_acc = float(self.ema_global_acc)
+        ema_lat = float(self.ema_global_lat)
+        ema_eng = float(self.ema_global_eng)
+
+        dropped_list = context.get("dropped_clients", [])
+        k_sel = max(1, context.get("select_k", len(self.last_selected_ids) or 1))
+        pool_dropout_rate = float(len(dropped_list) / k_sel)
+
+        delta_trend = float(np.mean(self.loss_delta_history[-5:])) if self.loss_delta_history else 0.0
+
+        c_accs = list(context.get("client_accuracies", {}).values())
+        var_acc = float(np.var(c_accs)) if len(c_accs) > 1 else 0.0
+
+        c_losses = list(context.get("client_losses", {}).values())
+        var_loss = float(np.var(c_losses)) if len(c_losses) > 1 else 0.0
+        disparity_loss = float(np.max(c_losses) - np.min(c_losses)) if c_losses else 0.0
+
+        client_ids = context.get("active_clients", self.last_client_ids)
+        diversity_feat = float(compute_selection_diversity(self.selection_history, client_ids, self.window_size))
+
+        anomaly_frac = float(compute_mad_anomaly_fraction(self.client_grad_sim, self.last_selected_ids, kappa=2.5))
+
+        global_features = [
+            ema_loss,
+            ema_acc,
+            ema_lat,
+            ema_eng,
+            progress,
+            pool_dropout_rate,
+            delta_trend,
+            var_acc,
+            var_loss,
+            disparity_loss,
+            diversity_feat,
+            anomaly_frac
+        ]
+
+        raw_global = np.array(global_features, dtype=np.float32)
+        return np.nan_to_num(raw_global, nan=0.0, posinf=1e6, neginf=-1e6)
+
+    def _build_conditioned_client_state(self, client_ids: List[str], agg_idx: int, context: Dict[str, Any]) -> np.ndarray:
+        base_state = build_base_client_features(
+            client_ids, context,
+            self.client_ema_loss, self.ema_global_loss,
+            self.client_ema_latency, self.client_ema_energy,
+            self.client_staleness, self.client_dropped,
+            self.client_grad_sim, self.selection_history,
+            window_size=self.window_size
+        )
+        return base_state.astype(np.float32)
+
+
 def get_selector_by_name(name: str, **kwargs) -> ClientSelector:
     """
     Factory function returning an instance of the requested ClientSelector strategy.
-    Supported names: 'random' (default), 'linucb' / 'd-linucb', 'wls-ts' / 'thompson', 'dqn', 'hierarchical', 'oort'
+    Supported names: 'random' (default), 'linucb' / 'd-linucb', 'wls-ts' / 'thompson', 'dqn', 'hierarchical', 'oort', 'unconditioned'
     """
     name_lower = (name or "random").lower()
     gamma = kwargs.get("gamma", 0.95)
@@ -1243,6 +1314,11 @@ def get_selector_by_name(name: str, **kwargs) -> ClientSelector:
         meta_agent = kwargs.get("meta_agent") or MetaAggregatorAgent(feature_dim=4, gamma=gamma_meta)
         sub_agent = kwargs.get("sub_agent") or LinUCBAgent(feature_dim=11, gamma=gamma_sub)
         return OortHierarchicalFLSelector(meta_agent=meta_agent, sub_agent=sub_agent, env=env)
+    elif name_lower in ["unconditioned", "independent", "unconditioned_hierarchical", "independent_hierarchical"]:
+        env = kwargs.get("env")
+        meta_agent = kwargs.get("meta_agent") or MetaAggregatorAgent(feature_dim=12, gamma=gamma_meta)
+        sub_agent = kwargs.get("sub_agent") or LinUCBAgent(feature_dim=7, gamma=gamma_sub)
+        return UnconditionedHierarchicalFLSelector(meta_agent=meta_agent, sub_agent=sub_agent, env=env)
     else:
         print(f"[Selector Warning] Unknown selector strategy '{name}'. Defaulting to RandomClientSelector.")
         return RandomClientSelector()
