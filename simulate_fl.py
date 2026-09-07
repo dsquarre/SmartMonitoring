@@ -166,7 +166,7 @@ def run_simulation(args):
     env = FederatedEnv(profiles, model_size_bits=10_000_000)
 
     # 3. Instantiate Selector & Aggregator
-    selector = get_selector_by_name(args.selector, env=env)
+    selector = get_selector_by_name(args.selector, env=env, gamma=args.gamma)
     aggregator = get_aggregator_by_name(args.aggregator)
 
     # 4. Initialize Global Model
@@ -512,6 +512,7 @@ if __name__ == "__main__":
     parser.add_argument("-o", "--output-dir", type=str, default="results/research_baseline",
                         help="Output directory for metrics and plots")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument("-g", "--gamma", type=float, default=0.95, help="Discount factor gamma in (0, 1.0]. Set 1.0 for undiscounted RL (default: 0.95)")
 
     parsed_args = parser.parse_args()
 
