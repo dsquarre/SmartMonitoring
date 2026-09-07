@@ -377,6 +377,7 @@ def run_simulation(args):
         energies = [cd[5] for cd in client_data]
 
         round_metrics = {
+            "seed": args.seed,
             "round": r,
             "loss": avg_loss,
             "accuracy": global_f2,  # Primary accuracy metric defined as F2 score
@@ -391,7 +392,8 @@ def run_simulation(args):
             "fn": total_fn,
             "auprc": global_auprc if global_auprc is not None else 0.0,
             "avg_comp_latency": float(np.mean(latencies)) if latencies else 0.0,
-            "total_round_energy": float(np.sum(energies)) if energies else 0.0
+            "total_round_energy": float(np.sum(energies)) if energies else 0.0,
+            "chosen_strategy": getattr(selector, "last_chosen_agg", args.aggregator)
         }
 
         round_history.append(round_metrics)
@@ -428,10 +430,18 @@ def run_simulation(args):
 
         selector.update_policy(round_summary)
 
-        # Save metrics to JSON and plot
+        # Save metrics to JSON, CSV and plot
         metrics_json_path = os.path.join(args.output_dir, "round_history.json")
         with open(metrics_json_path, "w") as f:
             json.dump(round_history, f, indent=2)
+
+        metrics_csv_path = os.path.join(args.output_dir, "metrics.csv")
+        if round_history:
+            fieldnames = list(round_history[0].keys())
+            with open(metrics_csv_path, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(round_history)
 
         plot_metrics(round_history, args.output_dir)
 
@@ -457,12 +467,14 @@ if __name__ == "__main__":
     parser.add_argument("-a", "--aggregator", type=str, default="fedavg",
                         help="Aggregation strategy: fedavg, qfedavg, fedfv, fedadam, fedprox, krum, scaffold")
     parser.add_argument("-s", "--selector", type=str, default="random",
-                        help="Selection strategy: random, linucb, wls-ts, dqn, hierarchical")
+                        help="Selection strategy: random, linucb, wls-ts, dqn, hierarchical, oort")
     parser.add_argument("-o", "--output-dir", type=str, default="results/research_baseline",
                         help="Output directory for metrics and plots")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
 
     parsed_args = parser.parse_args()
+    import random
+    random.seed(parsed_args.seed)
     np.random.seed(parsed_args.seed)
     tf.random.set_seed(parsed_args.seed)
 
