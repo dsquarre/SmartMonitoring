@@ -31,6 +31,30 @@ class TestUnconditionedSelector(unittest.TestCase):
         client_state = selector._build_conditioned_client_state(client_ids, agg_idx=0, context=context)
         self.assertEqual(client_state.shape, (10, 7))
 
+    def test_individual_client_selection_probability(self):
+        from selector import compute_client_selection_probabilities, build_base_client_features
+        client_ids = [f"client_{i}" for i in range(4)]
+        selection_history = [
+            ["client_0", "client_1"],
+            ["client_0", "client_2"]
+        ]
+        # Total selections = 4 (kW). client_0 selected 2 times (p_0 = 2/4 = 0.5), client_1 selected 1 (p_1 = 0.25), client_2 selected 1 (p_2 = 0.25), client_3 selected 0 (p_3 = 0.0)
+        probs = compute_client_selection_probabilities(selection_history, client_ids, window_size=10)
+        self.assertAlmostEqual(probs["client_0"], 0.5)
+        self.assertAlmostEqual(probs["client_1"], 0.25)
+        self.assertAlmostEqual(probs["client_2"], 0.25)
+        self.assertAlmostEqual(probs["client_3"], 0.0)
+
+        # Check feature 7 in X_t matrix
+        features = build_base_client_features(
+            client_ids, {}, {}, np.inf, {}, {}, {}, {}, {}, selection_history, window_size=10
+        )
+        self.assertAlmostEqual(features[0, 6], 0.5)   # client_0 p_i
+        self.assertAlmostEqual(features[1, 6], 0.25)  # client_1 p_i
+        self.assertAlmostEqual(features[2, 6], 0.25)  # client_2 p_i
+        self.assertAlmostEqual(features[3, 6], 0.0)   # client_3 p_i
+
 
 if __name__ == "__main__":
     unittest.main()
+
