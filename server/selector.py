@@ -419,6 +419,27 @@ class DQNAgent(BaseRLAgent):
         print(f"[DQN Agent] Loaded model weights from {filepath}")
 
 
+def compute_client_selection_probabilities(selection_history: List[List[str]], client_ids: List[str], window_size: int = 10) -> Dict[str, float]:
+    """
+    Computes individual client selection probabilities p_i = n_i / (kW) over trailing window W of rounds.
+    """
+    if not selection_history or not client_ids:
+        return {cid: 0.0 for cid in client_ids}
+
+    window = selection_history[-window_size:]
+    total_selections = sum(len(s) for s in window)
+    if total_selections == 0:
+        return {cid: 0.0 for cid in client_ids}
+
+    counts = {cid: 0 for cid in client_ids}
+    for round_selected in window:
+        for cid in round_selected:
+            if cid in counts:
+                counts[cid] += 1
+
+    return {cid: float(counts[cid] / float(total_selections)) for cid in client_ids}
+
+
 def compute_selection_diversity(selection_history: List[List[str]], client_ids: List[str], window_size: int = 10) -> float:
     """
     Computes normalized Shannon entropy diversity_t = H / log(N) over trailing window W of rounds.
@@ -428,20 +449,13 @@ def compute_selection_diversity(selection_history: List[List[str]], client_ids: 
     if N <= 1 or not selection_history:
         return 1.0
 
-    window = selection_history[-window_size:]
-    total_selections = sum(len(s) for s in window)
-    if total_selections == 0:
+    probs_dict = compute_client_selection_probabilities(selection_history, client_ids, window_size)
+    total_selections = sum(probs_dict.values())
+    if total_selections <= 0:
         return 1.0
 
-    counts = {cid: 0 for cid in client_ids}
-    for round_selected in window:
-        for cid in round_selected:
-            if cid in counts:
-                counts[cid] += 1
-
-    probs = [counts[cid] / float(total_selections) for cid in client_ids]
     H = 0.0
-    for p in probs:
+    for p in probs_dict.values():
         if p > 0:
             H -= p * np.log(p)
 
@@ -497,10 +511,12 @@ def build_base_client_features(
 ) -> np.ndarray:
     """
     Builds N x 7 feature matrix for clients:
-    [loss_diff, EMA_latency, EMA_energy, stale_count, drop_flag, grad_sim, entropy_diversity]
+    [loss_diff, EMA_latency, EMA_energy, stale_count, drop_flag, grad_sim, selection_prob_p_i]
+    Where selection_prob_p_i is client i's own selection probability p_i = n_i / (kW)
+    within the entropy calculation window W.
     Defaults unobserved loss, latency, energy, staleness to float('inf') / np.inf.
     """
-    diversity_t = compute_selection_diversity(selection_history, client_ids, window_size)
+    client_probs = compute_client_selection_probabilities(selection_history, client_ids, window_size)
     client_losses = context.get("client_losses", {})
 
     state_list = []
@@ -516,7 +532,7 @@ def build_base_client_features(
         staleness = float(client_staleness.get(cid, np.inf))
         drop_flag = float(client_dropped.get(cid, 0.0))
         grad_sim = float(client_grad_sim.get(cid, 0.0))
-        entropy_feat = float(diversity_t)
+        p_i = float(client_probs.get(cid, 0.0))
 
         state_list.append([
             loss_diff,
@@ -525,10 +541,11 @@ def build_base_client_features(
             staleness,
             drop_flag,
             grad_sim,
-            entropy_feat
+            p_i
         ])
     raw_state = np.array(state_list, dtype=np.float32)
     return np.nan_to_num(raw_state, nan=0.0, posinf=1e6, neginf=-1e6)
+
 
 
 def build_oort_client_features(
