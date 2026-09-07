@@ -65,30 +65,34 @@ def plot_metrics(round_history, output_dir):
     plt.savefig(os.path.join(output_dir, "loss_vs_round.png"))
     plt.close()
 
-    # 2. Accuracy vs Round
+    # 2. Accuracy (F2 Score) & F1 vs Round
     plt.figure(figsize=(8, 5))
-    plt.plot(rounds, [x.get("accuracy", 0.0) for x in round_history], marker='o', color='royalblue', label='Accuracy')
+    plt.plot(rounds, [x.get("f2", x.get("accuracy", 0.0)) for x in round_history], marker='o', color='royalblue', label='F2 Score (Primary Accuracy)')
+    plt.plot(rounds, [x.get("f1", 0.0) for x in round_history], marker='s', color='purple', label='F1 Score')
+    plt.plot(rounds, [x.get("recall", 0.0) for x in round_history], marker='^', color='forestgreen', label='Recall')
+    plt.plot(rounds, [x.get("precision", 0.0) for x in round_history], marker='d', color='darkorange', label='Precision')
     plt.xlabel("Federated Round")
-    plt.ylabel("Accuracy")
-    plt.title("Global Test Accuracy vs Federated Round")
+    plt.ylabel("Score")
+    plt.title("Global F2, F1, Recall & Precision vs Federated Round")
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
     plt.savefig(os.path.join(output_dir, "accuracy_vs_round.png"))
     plt.close()
 
-    # 3. F1 & ROC-AUC vs Round
-    plt.figure(figsize=(8, 5))
-    plt.plot(rounds, [x.get("f1", 0.0) for x in round_history], marker='o', color='purple', label='F1 Score')
-    plt.plot(rounds, [x.get("roc_auc", 0.5) for x in round_history], marker='s', color='darkorange', label='ROC AUC')
-    plt.xlabel("Federated Round")
-    plt.ylabel("Score")
-    plt.title("F1 Score & ROC AUC vs Federated Round")
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "f1_vs_round.png"))
-    plt.close()
+    # 3. AUPRC vs Round
+    auprc_vals = [x.get("auprc", 0.0) for x in round_history if x.get("auprc") is not None]
+    if auprc_vals and any(v > 0 for v in auprc_vals):
+        plt.figure(figsize=(8, 5))
+        plt.plot(rounds, [x.get("auprc", 0.0) for x in round_history], marker='D', color='teal', label='Periodic AUPRC (PR-AUC)')
+        plt.xlabel("Federated Round")
+        plt.ylabel("AUPRC Score")
+        plt.title("Global AUPRC vs Federated Round (Evaluated Every 10 Rounds)")
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, "auprc_vs_round.png"))
+        plt.close()
 
     # 4. Confusion Matrix (Latest Round)
     latest = round_history[-1]
@@ -100,7 +104,7 @@ def plot_metrics(round_history, output_dir):
         sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
                     xticklabels=['Normal (0)', 'AFib (1)'],
                     yticklabels=['Normal (0)', 'AFib (1)'])
-        plt.xlabel("Predicted Label")
+        plt.xlabel("Predicted Label (Threshold 0.3)")
         plt.ylabel("True Label")
         plt.title(f"Global Confusion Matrix (Round {latest.get('round', '')})")
         plt.tight_layout()
@@ -308,12 +312,24 @@ def run_simulation(args):
         elapsed_round = time.time() - start_round_time
 
         # Evaluation Phase across all selected (or available) clients
-        print(f"[Evaluation] Evaluating updated global model on selected clients...")
+        is_auprc_round = (r == 1 or r % 10 == 0)
+        print(f"[Evaluation] Evaluating updated global model on selected clients (Threshold 0.3 | AUPRC Round: {is_auprc_round})...")
         eval_results = []
+        all_y_true = []
+        all_y_score = []
+
         for cid in selected_ids:
             cm = ClientModel(client_files[cid], batch_size=args.batch_size)
             cm.model.load_weights(global_model_path)
-            e_res = cm.evaluate()
+            
+            if is_auprc_round:
+                e_res, y_t, y_s = cm.evaluate(threshold=0.3, return_preds=True)
+                if len(y_t) > 0:
+                    all_y_true.append(y_t)
+                    all_y_score.append(y_s)
+            else:
+                e_res = cm.evaluate(threshold=0.3, return_preds=False)
+
             eval_results.append({
                 "client_id": cid,
                 "samples": client_samples[cid],
@@ -323,28 +339,64 @@ def run_simulation(args):
 
         tf.keras.backend.clear_session()
 
-        # Compute weighted global metrics
-        total_eval_samples = sum(ev["samples"] for ev in eval_results)
-        metric_names = eval_results[0]["metrics"].keys()
-        round_metrics = {"round": r}
-        count_metrics = {"tp", "fp", "tn", "fn"}
+        # Global Micro-Aggregation of Confusion Matrix Counts across evaluating clients
+        total_tp = sum(int(ev["metrics"].get("tp", 0)) for ev in eval_results)
+        total_fp = sum(int(ev["metrics"].get("fp", 0)) for ev in eval_results)
+        total_tn = sum(int(ev["metrics"].get("tn", 0)) for ev in eval_results)
+        total_fn = sum(int(ev["metrics"].get("fn", 0)) for ev in eval_results)
 
-        for m_key in metric_names:
-            if m_key in count_metrics:
-                round_metrics[m_key] = int(sum(ev["metrics"][m_key] for ev in eval_results))
+        global_prec = float(total_tp / (total_tp + total_fp + 1e-8))
+        global_rec = float(total_tp / (total_tp + total_fn + 1e-8))
+
+        denom_f1 = (global_prec + global_rec)
+        global_f1 = float((2 * global_prec * global_rec) / denom_f1) if denom_f1 > 0 else 0.0
+
+        denom_f2 = (4 * global_prec + global_rec)
+        global_f2 = float((5 * global_prec * global_rec) / denom_f2) if denom_f2 > 0 else 0.0
+
+        total_eval_samples = total_tp + total_tn + total_fp + total_fn
+        global_raw_acc = float((total_tp + total_tn) / (total_eval_samples + 1e-8)) if total_eval_samples > 0 else 0.0
+        avg_loss = float(np.mean([ev["metrics"]["loss"] for ev in eval_results])) if eval_results else 1.0
+
+        # Periodic Global AUPRC Computation (Every 10 Rounds & Round 1)
+        global_auprc = None
+        if is_auprc_round and all_y_true and all_y_score:
+            concat_y_true = np.concatenate(all_y_true)
+            concat_y_score = np.concatenate(all_y_score)
+            if len(np.unique(concat_y_true)) > 1:
+                from sklearn.metrics import precision_recall_curve, auc
+                p_curve, r_curve, _ = precision_recall_curve(concat_y_true, concat_y_score)
+                global_auprc = float(auc(r_curve, p_curve))
+                print(f"[Periodic AUPRC] Round {r} Global AUPRC: {global_auprc:.4f}")
             else:
-                w_avg = sum(ev["metrics"][m_key] * (ev["samples"] / total_eval_samples) for ev in eval_results)
-                round_metrics[m_key] = float(w_avg)
+                global_auprc = 0.5
+        elif len(round_history) > 0 and "auprc" in round_history[-1]:
+            global_auprc = round_history[-1]["auprc"]
 
-        # Track system metrics
         latencies = [cd[4] for cd in client_data]
         energies = [cd[5] for cd in client_data]
-        round_metrics["avg_comp_latency"] = float(np.mean(latencies)) if latencies else 0.0
-        round_metrics["total_round_energy"] = float(np.sum(energies)) if energies else 0.0
+
+        round_metrics = {
+            "round": r,
+            "loss": avg_loss,
+            "accuracy": global_f2,  # Primary accuracy metric defined as F2 score
+            "f2": global_f2,
+            "f1": global_f1,
+            "precision": global_prec,
+            "recall": global_rec,
+            "raw_accuracy": global_raw_acc,
+            "tp": total_tp,
+            "fp": total_fp,
+            "tn": total_tn,
+            "fn": total_fn,
+            "auprc": global_auprc if global_auprc is not None else 0.0,
+            "avg_comp_latency": float(np.mean(latencies)) if latencies else 0.0,
+            "total_round_energy": float(np.sum(energies)) if energies else 0.0
+        }
 
         round_history.append(round_metrics)
 
-        print(f" Round {r} Results | Loss: {round_metrics['loss']:.4f} | Acc: {round_metrics['accuracy']:.4f} | F1: {round_metrics['f1']:.4f} | Time: {elapsed_round:.2f}s")
+        print(f" Round {r} Results | Loss: {round_metrics['loss']:.4f} | F2 (Acc): {global_f2:.4f} | F1: {global_f1:.4f} | Rec: {global_rec:.4f} | Prec: {global_prec:.4f} | Time: {elapsed_round:.2f}s")
 
         # Update Client Selector Policy (RL / Contextual Bandits)
         prev_loss = round_history[-2]["loss"] if len(round_history) > 1 else round_metrics["loss"]

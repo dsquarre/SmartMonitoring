@@ -164,24 +164,32 @@ class Model:
             updated_value = current_value - (server_lr * gg)
             var.assign(updated_value)
 
-    def evaluate(self):
+    def evaluate(self, threshold=0.3, return_preds=False):
         """Evaluates model performance on the local test partition and returns metrics."""
+        empty_res = {
+            "loss": 0.0,
+            "accuracy": 0.0,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "f2": 0.0,
+            "roc_auc": 0.5,
+            "tp": 0,
+            "fp": 0,
+            "tn": 0,
+            "fn": 0
+        }
         if self.num_test_samples == 0:
-            return {
-                "loss": 0.0,
-                "accuracy": 0.0,
-                "precision": 0.0,
-                "recall": 0.0,
-                "f1": 0.0,
-                "roc_auc": 0.0
-            }
+            if return_preds:
+                return empty_res, np.array([], dtype=int), np.array([], dtype=np.float32)
+            return empty_res
 
         test_ds = self.get_dataset(self.X_test, self.y_test, shuffle=False)
         steps = max(1, int(np.ceil(self.num_test_samples / self.batch_size)))
 
         preds = self.model.predict(test_ds, steps=steps, verbose=0)
         preds_flat = preds.flatten()[:self.num_test_samples]
-        pred_binary = (preds_flat >= 0.5).astype(int)
+        pred_binary = (preds_flat >= threshold).astype(int)
 
         y_true = np.array(self.y_test[:self.num_test_samples], dtype=int)
 
@@ -193,18 +201,33 @@ class Model:
         else:
             auc_val = 0.5
 
-        return {
+        prec = float(precision_score(y_true, pred_binary, zero_division=0))
+        rec = float(recall_score(y_true, pred_binary, zero_division=0))
+        denom_f2 = (4 * prec + rec)
+        f2_val = float((5 * prec * rec) / denom_f2) if denom_f2 > 0 else 0.0
+
+        tp_val = int(np.sum((y_true == 1) & (pred_binary == 1)))
+        tn_val = int(np.sum((y_true == 0) & (pred_binary == 0)))
+        fp_val = int(np.sum((y_true == 0) & (pred_binary == 1)))
+        fn_val = int(np.sum((y_true == 1) & (pred_binary == 0)))
+
+        metrics_dict = {
             "loss": float(eval_res.get("loss", 0.0)),
-            "accuracy": float(accuracy_score(y_true, pred_binary)),
-            "precision": float(precision_score(y_true, pred_binary, zero_division=0)),
-            "recall": float(recall_score(y_true, pred_binary, zero_division=0)),
+            "accuracy": f2_val,
+            "precision": prec,
+            "recall": rec,
             "f1": float(f1_score(y_true, pred_binary, zero_division=0)),
+            "f2": f2_val,
             "roc_auc": auc_val,
-            "tp": int(eval_res.get("tp", 0)),
-            "fp": int(eval_res.get("fp", 0)),
-            "tn": int(eval_res.get("tn", 0)),
-            "fn": int(eval_res.get("fn", 0))
+            "tp": tp_val,
+            "fp": fp_val,
+            "tn": tn_val,
+            "fn": fn_val
         }
+
+        if return_preds:
+            return metrics_dict, y_true, preds_flat
+        return metrics_dict
 
     def get_weights(self):
         return self.model.get_weights()
