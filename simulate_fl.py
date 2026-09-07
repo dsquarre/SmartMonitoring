@@ -40,6 +40,15 @@ from server.aggregator import get_aggregator_by_name, FedFV
 from server.rl_env import FederatedEnv
 
 
+def compute_dynamic_k(n_clients: int) -> int:
+    """
+    Dynamic K Selection: K = max(5, floor(0.2 * N)) if N >= 5, else N.
+    """
+    if n_clients >= 5:
+        return max(5, int(0.2 * n_clients))
+    return max(1, n_clients)
+
+
 def plot_metrics(round_history, output_dir):
     """Generates and saves research baseline performance plots."""
     import matplotlib
@@ -289,24 +298,32 @@ def run_simulation(args):
         except Exception as e:
             print(f"[GradSim Warning] Could not calculate gradient similarities: {e}")
 
-        # Aggregation Phase
-        print(f"[Aggregator ({aggregator.__class__.__name__})] Aggregating client updates...")
-        if aggregator.mode == "gradients":
-            assert isinstance(aggregator, FedFV)
-            global_gt = aggregator.aggregate(client_data, global_model_path, current_round=r, ModelClass=ServerModel)
-            
-            # Apply global gradients back to global model
-            gm = ServerModel()
-            gm.model.load_weights(global_model_path)
-            
-            # Apply update using ServerModel's trainable variables
-            trainable_vars = gm.model.trainable_variables
-            for var, gg in zip(trainable_vars, global_gt):
-                var.assign(var.numpy() - (0.001 * gg))
-            gm.model.save(global_model_path)
-            del gm
+        # Check Training Response Threshold tau_train = 0.5 * K
+        tau_train = 0.5 * k
+        n_responding_train = len(client_data)
+
+        if n_responding_train < tau_train:
+            print(f"[Training Dropout Warning] Responding training clients ({n_responding_train}) below threshold ({tau_train:.1f}). Skipping weight aggregation.")
+            dropped_training = True
         else:
-            aggregator.aggregate(client_data, global_model_path, current_round=r)
+            dropped_training = False
+            # Aggregation Phase
+            print(f"[Aggregator ({aggregator.__class__.__name__})] Aggregating client updates...")
+            if aggregator.mode == "gradients":
+                assert isinstance(aggregator, FedFV)
+                global_gt = aggregator.aggregate(client_data, global_model_path, current_round=r, ModelClass=ServerModel)
+                
+                # Apply global gradients back to global model
+                gm = ServerModel()
+                gm.model.load_weights(global_model_path)
+                
+                trainable_vars = gm.model.trainable_variables
+                for var, gg in zip(trainable_vars, global_gt):
+                    var.assign(var.numpy() - (0.001 * gg))
+                gm.model.save(global_model_path)
+                del gm
+            else:
+                aggregator.aggregate(client_data, global_model_path, current_round=r)
 
         tf.keras.backend.clear_session()
         elapsed_round = time.time() - start_round_time
@@ -339,39 +356,63 @@ def run_simulation(args):
 
         tf.keras.backend.clear_session()
 
-        # Global Micro-Aggregation of Confusion Matrix Counts across evaluating clients
-        total_tp = sum(int(ev["metrics"].get("tp", 0)) for ev in eval_results)
-        total_fp = sum(int(ev["metrics"].get("fp", 0)) for ev in eval_results)
-        total_tn = sum(int(ev["metrics"].get("tn", 0)) for ev in eval_results)
-        total_fn = sum(int(ev["metrics"].get("fn", 0)) for ev in eval_results)
+        # Check Evaluation Response Threshold tau_eval = 0.5 * N
+        tau_eval = 0.5 * n_clients
+        n_responding_eval = len(eval_results)
 
-        global_prec = float(total_tp / (total_tp + total_fp + 1e-8))
-        global_rec = float(total_tp / (total_tp + total_fn + 1e-8))
-
-        denom_f1 = (global_prec + global_rec)
-        global_f1 = float((2 * global_prec * global_rec) / denom_f1) if denom_f1 > 0 else 0.0
-
-        denom_f2 = (4 * global_prec + global_rec)
-        global_f2 = float((5 * global_prec * global_rec) / denom_f2) if denom_f2 > 0 else 0.0
-
-        total_eval_samples = total_tp + total_tn + total_fp + total_fn
-        global_raw_acc = float((total_tp + total_tn) / (total_eval_samples + 1e-8)) if total_eval_samples > 0 else 0.0
-        avg_loss = float(np.mean([ev["metrics"]["loss"] for ev in eval_results])) if eval_results else 1.0
-
-        # Periodic Global AUPRC Computation (Every 10 Rounds & Round 1)
-        global_auprc = None
-        if is_auprc_round and all_y_true and all_y_score:
-            concat_y_true = np.concatenate(all_y_true)
-            concat_y_score = np.concatenate(all_y_score)
-            if len(np.unique(concat_y_true)) > 1:
-                from sklearn.metrics import precision_recall_curve, auc
-                p_curve, r_curve, _ = precision_recall_curve(concat_y_true, concat_y_score)
-                global_auprc = float(auc(r_curve, p_curve))
-                print(f"[Periodic AUPRC] Round {r} Global AUPRC: {global_auprc:.4f}")
+        if dropped_training or n_responding_eval < tau_eval:
+            if round_history:
+                prev = round_history[-1]
+                total_tp = prev.get("tp", 0)
+                total_fp = prev.get("fp", 0)
+                total_tn = prev.get("tn", 0)
+                total_fn = prev.get("fn", 0)
+                global_prec = prev.get("precision", 0.0)
+                global_rec = prev.get("recall", 0.0)
+                global_f1 = prev.get("f1", 0.0)
+                global_f2 = prev.get("f2", prev.get("accuracy", 0.0))
+                global_raw_acc = prev.get("raw_accuracy", 0.0)
+                avg_loss = prev.get("loss", 1.0)
+                global_auprc = prev.get("auprc", 0.5)
             else:
+                total_tp, total_fp, total_tn, total_fn = 0, 0, 0, 0
+                global_prec, global_rec, global_f1, global_f2, global_raw_acc = 0.0, 0.0, 0.0, 0.0, 0.0
+                avg_loss = 1.0
                 global_auprc = 0.5
-        elif len(round_history) > 0 and "auprc" in round_history[-1]:
-            global_auprc = round_history[-1]["auprc"]
+        else:
+            # Global Micro-Aggregation of Confusion Matrix Counts across evaluating clients
+            total_tp = sum(int(ev["metrics"].get("tp", 0)) for ev in eval_results)
+            total_fp = sum(int(ev["metrics"].get("fp", 0)) for ev in eval_results)
+            total_tn = sum(int(ev["metrics"].get("tn", 0)) for ev in eval_results)
+            total_fn = sum(int(ev["metrics"].get("fn", 0)) for ev in eval_results)
+
+            global_prec = float(total_tp / (total_tp + total_fp + 1e-8))
+            global_rec = float(total_tp / (total_tp + total_fn + 1e-8))
+
+            denom_f1 = (global_prec + global_rec)
+            global_f1 = float((2 * global_prec * global_rec) / denom_f1) if denom_f1 > 0 else 0.0
+
+            denom_f2 = (4 * global_prec + global_rec)
+            global_f2 = float((5 * global_prec * global_rec) / denom_f2) if denom_f2 > 0 else 0.0
+
+            total_eval_samples = total_tp + total_tn + total_fp + total_fn
+            global_raw_acc = float((total_tp + total_tn) / (total_eval_samples + 1e-8)) if total_eval_samples > 0 else 0.0
+            avg_loss = float(np.mean([ev["metrics"]["loss"] for ev in eval_results])) if eval_results else 1.0
+
+            # Periodic Global AUPRC Computation (Every 10 Rounds & Round 1)
+            global_auprc = None
+            if is_auprc_round and all_y_true and all_y_score:
+                concat_y_true = np.concatenate(all_y_true)
+                concat_y_score = np.concatenate(all_y_score)
+                if len(np.unique(concat_y_true)) > 1:
+                    from sklearn.metrics import precision_recall_curve, auc
+                    p_curve, r_curve, _ = precision_recall_curve(concat_y_true, concat_y_score)
+                    global_auprc = float(auc(r_curve, p_curve))
+                    print(f"[Periodic AUPRC] Round {r} Global AUPRC: {global_auprc:.4f}")
+                else:
+                    global_auprc = 0.5
+            elif len(round_history) > 0 and "auprc" in round_history[-1]:
+                global_auprc = round_history[-1]["auprc"]
 
         latencies = [cd[4] for cd in client_data]
         energies = [cd[5] for cd in client_data]
@@ -459,7 +500,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Standalone In-Process FL Research Baseline Simulation")
     parser.add_argument("--data-dir", type=str, default="data/iid", help="Path to client dataset partitions folder")
     parser.add_argument("-n", "--num-clients", type=int, default=10, help="Total clients N (default: 10)")
-    parser.add_argument("-k", "--select-k", type=int, default=3, help="Clients selected per round K (default: 3)")
+    parser.add_argument("-k", "--select-k", type=int, default=None, help="Clients selected per round K (default: dynamic max(5, 0.2*N))")
     parser.add_argument("-r", "--rounds", type=int, default=5, help="Total FL rounds (default: 5)")
     parser.add_argument("-e", "--local-epochs", type=int, default=1, help="Local training epochs per round (default: 1)")
     parser.add_argument("-b", "--batch-clients", type=int, default=1, help="Clients trained per sequential batch (default: 1)")
@@ -473,6 +514,12 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
 
     parsed_args = parser.parse_args()
+
+    # Dynamic K calculation if --select-k was not provided explicitly
+    if parsed_args.select_k is None:
+        parsed_args.select_k = compute_dynamic_k(parsed_args.num_clients)
+        print(f"[Dynamic K] Automatically set K={parsed_args.select_k} for N={parsed_args.num_clients}")
+
     import random
     random.seed(parsed_args.seed)
     np.random.seed(parsed_args.seed)
