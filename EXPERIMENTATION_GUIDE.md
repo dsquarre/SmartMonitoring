@@ -56,15 +56,15 @@ Clients are deterministically assigned one of 4 standard hardware tiers at start
 ## 2. Rounds Calibration Protocol ($T = 1.5 T_0$)
 
 Before running 30-seed hypothesis experiments, calibrate the optimal federated round budget $T$:
-1. **Run Full-Participation Baseline Baseline**: Execute FedAvg with $N=100$ clients and full participation $K=100$ across an initial 50 rounds:
+1. **Run Full-Participation Baseline**: Execute FedAvg with $N=100$ clients and full participation $K=100$ across at least **200 rounds** (required for Non-IID datasets to ensure complete convergence and plateau detection):
    ```bash
-   conda run -n web python simulate_fl.py --data-dir data/iid -n 100 -k 100 -r 50 -a fedavg -o results/to_calibration
+   conda run -n web python simulate_fl.py --data-dir data/non_iid -n 100 -k 100 -r 200 -a fedavg -o results/to_calibration
    ```
-2. **Execute $T_0$ Calibration Script**: Detect the plateau round $T_0$ (where the $F_2$ accuracy curve stabilizes over 10+ consecutive rounds) and compute $T = \lceil 1.5 \times T_0 \rceil$:
+2. **Execute $T_0$ Calibration Script**: Detect the plateau round $T_0$ (where the $F_2$ accuracy / loss curve stabilizes over 10+ consecutive rounds) and compute $T = \lceil 1.5 \times T_0 \rceil$:
    ```bash
    conda run -n web python calibrate_t0.py --metrics results/to_calibration/metrics.csv
    ```
-3. **Set $T$ Environment Variable**: Use the calibrated $T$ (e.g. `T=45` if $T_0=30$) in all subsequent 30-seed hypothesis runs.
+3. **Set $T$ Environment Variable**: Use the calibrated $T$ (e.g., `T=150` if $T_0=100$, or `T=180` if $T_0=120$) in all subsequent 30-seed hypothesis runs.
 
 ---
 
@@ -76,14 +76,14 @@ The following bash commands run 30 distinct seeds (`42` to `71`) with $N=100$ cl
 3. **Total/Average Latency**
 4. **Round to reach 90% Target Accuracy**
 
-*Note: Replace `$T` below with your calibrated round count (e.g., `T=45`).*
+*Note: Set `$T` from your `calibrate_t0.py` output (e.g., `T=150`).*
 
 ---
 
 ### Hypothesis 1: Proposed Custom State ($G_t, X_t$) vs. Simple Oort-Style State
 
 ```bash
-T=45  # Set from calibrate_t0.py
+T=150  # Set from calibrate_t0.py (1.5 * T0)
 
 # 1. Run 30 Seeds for Proposed Custom State (Hierarchical RL)
 for seed in $(seq 42 71); do
@@ -107,7 +107,7 @@ conda run -n web python compare_experiments.py \
 ### Hypothesis 2: Decoupled Discounted vs. Undiscounted LinUCB/TS
 
 ```bash
-T=45  # Set from calibrate_t0.py
+T=150  # Set from calibrate_t0.py
 
 # 1. Both Discounted (gamma_meta=0.95, gamma_sub=0.95)
 for seed in $(seq 42 71); do
@@ -141,7 +141,7 @@ conda run -n web python compare_experiments.py \
 ### Hypothesis 3: Aggregator Selection is Valuable and Converges (8-Way Comparison)
 
 ```bash
-T=45  # Set from calibrate_t0.py
+T=150  # Set from calibrate_t0.py
 
 # Step A: Pre-train and Save Selector over 30 Seeds
 for seed in $(seq 42 71); do
@@ -171,7 +171,7 @@ conda run -n web python compare_experiments.py \
 ### Hypothesis 4: Multi-Objective Pareto vs. Accuracy-Only Objective
 
 ```bash
-T=45  # Set from calibrate_t0.py
+T=150  # Set from calibrate_t0.py
 
 # 1. Run 30 Seeds for Multi-Objective Pareto (w_lat=1.0, w_eng=1.0)
 for seed in $(seq 42 71); do
@@ -197,7 +197,7 @@ conda run -n web python compare_experiments.py \
 Tests whether cross-conditioning Level 2 client selection ($X_t$) on the chosen aggregator and tracking previous aggregator actions in Level 1 ($G_t$) improves performance compared to running both controllers independently without cross-conditioning.
 
 ```bash
-T=45  # Set from calibrate_t0.py
+T=150  # Set from calibrate_t0.py
 
 # 1. Run 30 Seeds for Proposed Conditioned Hierarchical Selector (G_t 20d, X_t 14d)
 for seed in $(seq 42 71); do
