@@ -206,7 +206,13 @@ def run_simulation(args):
     env = FederatedEnv(profiles, model_size_bits=10_000_000)
 
     # 3. Instantiate Selector & Aggregator
-    selector = get_selector_by_name(args.selector, env=env, gamma=args.gamma)
+    selector = get_selector_by_name(
+        args.selector,
+        env=env,
+        gamma=args.gamma,
+        gamma_meta=args.gamma_meta,
+        gamma_sub=args.gamma_sub
+    )
     aggregator = get_aggregator_by_name(args.aggregator)
 
     if getattr(args, "load_selector", None):
@@ -590,6 +596,8 @@ if __name__ == "__main__":
                         help="Output directory for metrics and plots")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("-g", "--gamma", type=float, default=0.95, help="Discount factor gamma in (0, 1.0]. Set 1.0 for undiscounted RL (default: 0.95)")
+    parser.add_argument("--gamma-meta", type=float, default=None, help="Level 1 Meta-Aggregator discount factor gamma (defaults to --gamma)")
+    parser.add_argument("--gamma-sub", type=float, default=None, help="Level 2 Sub-controller discount factor gamma (defaults to --gamma)")
     parser.add_argument("--w-loss", type=float, default=1.0, help="Sub-controller loss weight w_loss (default: 1.0)")
     parser.add_argument("--w-acc", type=float, default=10.0, help="Meta-controller accuracy weight w_acc (default: 10.0)")
     parser.add_argument("--w-lat", type=float, default=1.0, help="Latency penalty weight w_L (default: 1.0)")
@@ -600,6 +608,11 @@ if __name__ == "__main__":
     parser.add_argument("--freeze-selector", action="store_true", help="Freeze loaded selector policy (no parameter updates during evaluation)")
 
     parsed_args = parser.parse_args()
+
+    if parsed_args.gamma_meta is None:
+        parsed_args.gamma_meta = parsed_args.gamma
+    if parsed_args.gamma_sub is None:
+        parsed_args.gamma_sub = parsed_args.gamma
 
     if parsed_args.accuracy_only:
         parsed_args.w_lat = 0.0

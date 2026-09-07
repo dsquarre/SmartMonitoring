@@ -1,6 +1,6 @@
 # SmartMonitoring Experimentation Guide
 
-A concise reference for running Federated Learning experiments, customizing multi-objective rewards, persisting trained selectors, and generating 2D/3D Pareto trade-off plots.
+A concise reference for running Federated Learning experiments, customizing multi-objective rewards, persisting trained selectors, and generating 2D/3D Pareto trade-off plots with 30-seed paired hypothesis testing.
 
 ---
 
@@ -23,6 +23,8 @@ A concise reference for running Federated Learning experiments, customizing mult
 | `-a`, `--aggregator` | `fedavg` (default), `qfedavg`, `fedfv`, `fedadam`, `fedprox`, `krum`, `scaffold` | Global aggregation algorithm |
 | `-s`, `--selector` | `random` (default), `linucb`, `wls-ts`, `dqn`, `hierarchical`, `oort` | Client selection algorithm |
 | `-g`, `--gamma` | `0.95` (default, range `(0, 1.0]`) | Exponential discount factor. Set `-g 1.0` for undiscounted RL. |
+| `--gamma-meta` | `None` (defaults to `--gamma`) | Level 1 Meta-Aggregator discount factor $\gamma_{\text{meta}}$ |
+| `--gamma-sub` | `None` (defaults to `--gamma`) | Level 2 Sub-controller discount factor $\gamma_{\text{sub}}$ |
 
 ### Reward Weight Customization & Accuracy-Only Mode
 | Parameter | Default | Description |
@@ -51,96 +53,116 @@ Clients are deterministically assigned one of 4 standard hardware tiers at start
 
 ---
 
-## 2. Experiment Workflows
+## 2. 30-Seed Hypothesis Testing Workflows
 
-### Workflow 1: Multi-Objective vs. Accuracy-Only Optimization
-Compare multi-objective optimization ($w_L=1.0, w_E=1.0$) against accuracy-only optimization ($w_L=0, w_E=0$).
+The following bash commands run 30 distinct seeds (`42` to `71`) and execute paired $t$-tests and Wilcoxon signed-rank tests for:
+1. **Max/Final $F_2$ Accuracy in Round $T$**
+2. **Total Energy across all rounds**
+3. **Total/Average Latency**
+4. **Round to reach 90% Target Accuracy**
+
+---
+
+### Hypothesis 1: Proposed Custom State ($G_t, X_t$) vs. Simple Oort-Style State
 
 ```bash
-# Run 1: Multi-Objective Optimization
-conda run -n web python simulate_fl.py \
-  --data-dir data/iid -n 10 -r 10 --seed 42 \
-  -s hierarchical \
-  --w-lat 1.0 --w-eng 1.0 \
-  -o results/exp_multiobj_s42
+# 1. Run 30 Seeds for Proposed Custom State (Hierarchical RL)
+for seed in $(seq 42 71); do
+  conda run -n web python simulate_fl.py --data-dir data/iid -n 10 -r 10 --seed $seed -s hierarchical -o results/h1_custom/s${seed}
+done
 
-# Run 2: Accuracy-Only Optimization
-conda run -n web python simulate_fl.py \
-  --data-dir data/iid -n 10 -r 10 --seed 42 \
-  -s hierarchical \
-  --accuracy-only \
-  -o results/exp_acconly_s42
+# 2. Run 30 Seeds for Simple Oort-Style State (Oort RL)
+for seed in $(seq 42 71); do
+  conda run -n web python simulate_fl.py --data-dir data/iid -n 10 -r 10 --seed $seed -s oort -o results/h1_oort/s${seed}
+done
 
-# Plot Pareto & Comparative Overlays
+# 3. Paired Hypothesis Test & Pareto Comparison
 conda run -n web python compare_experiments.py \
-  --dirs results/exp_multiobj_s42 results/exp_acconly_s42 \
+  --dirs "results/h1_custom/s*" "results/h1_oort/s*" \
+  --labels "Proposed Custom State" "Oort-Style State" \
+  -o results/hypothesis1_results
+```
+
+---
+
+### Hypothesis 2: Decoupled Discounted vs. Undiscounted LinUCB/TS
+
+```bash
+# 1. Both Discounted (gamma_meta=0.95, gamma_sub=0.95)
+for seed in $(seq 42 71); do
+  conda run -n web python simulate_fl.py --data-dir data/iid -n 10 -r 10 --seed $seed -s hierarchical --gamma-meta 0.95 --gamma-sub 0.95 -o results/h2_discount_both/s${seed}
+done
+
+# 2. Level 1 Meta-Controller Discounted Only (gamma_meta=0.95, gamma_sub=1.0)
+for seed in $(seq 42 71); do
+  conda run -n web python simulate_fl.py --data-dir data/iid -n 10 -r 10 --seed $seed -s hierarchical --gamma-meta 0.95 --gamma-sub 1.0 -o results/h2_meta_only/s${seed}
+done
+
+# 3. Level 2 Sub-Controller Discounted Only (gamma_meta=1.0, gamma_sub=0.95)
+for seed in $(seq 42 71); do
+  conda run -n web python simulate_fl.py --data-dir data/iid -n 10 -r 10 --seed $seed -s hierarchical --gamma-meta 1.0 --gamma-sub 0.95 -o results/h2_sub_only/s${seed}
+done
+
+# 4. Both Undiscounted (gamma_meta=1.0, gamma_sub=1.0)
+for seed in $(seq 42 71); do
+  conda run -n web python simulate_fl.py --data-dir data/iid -n 10 -r 10 --seed $seed -s hierarchical --gamma-meta 1.0 --gamma-sub 1.0 -o results/h2_undiscounted_both/s${seed}
+done
+
+# 5. Paired Hypothesis Test & 4-Overlay Comparison
+conda run -n web python compare_experiments.py \
+  --dirs "results/h2_discount_both/s*" "results/h2_meta_only/s*" "results/h2_sub_only/s*" "results/h2_undiscounted_both/s*" \
+  --labels "Both Discounted (0.95)" "Meta Discounted Only" "Sub Discounted Only" "Both Undiscounted (1.0)" \
+  -o results/hypothesis2_results
+```
+
+---
+
+### Hypothesis 3: Aggregator Selection is Valuable and Converges (8-Way Comparison)
+
+```bash
+# Step A: Pre-train and Save Selector over 30 Seeds
+for seed in $(seq 42 71); do
+  conda run -n web python simulate_fl.py --data-dir data/iid -n 10 -r 10 --seed $seed -s linucb --save-selector results/h3_saved_selectors/selector_s${seed}.npz -o results/h3_train/s${seed}
+done
+
+# Step B: Run Frozen Selector with Meta-Aggregator & 7 Fixed Aggregators across 30 Seeds
+for seed in $(seq 42 71); do
+  # 1. Dynamic Meta-Aggregator + Frozen Selector
+  conda run -n web python simulate_fl.py --data-dir data/iid -n 10 -r 5 --seed $seed -s hierarchical --load-selector results/h3_saved_selectors/selector_s${seed}.npz --freeze-selector -o results/h3_meta/s${seed}
+
+  # 2-8. Fixed Aggregators + Frozen Selector
+  for agg in fedavg fedprox scaffold krum fedadam fedfv qfedavg; do
+    conda run -n web python simulate_fl.py --data-dir data/iid -n 10 -r 5 --seed $seed -s linucb -a $agg --load-selector results/h3_saved_selectors/selector_s${seed}.npz --freeze-selector -o results/h3_${agg}/s${seed}
+  done
+done
+
+# Step C: 8-Way Overlay & Pareto Hypothesis Comparison
+conda run -n web python compare_experiments.py \
+  --dirs "results/h3_meta/s*" "results/h3_fedavg/s*" "results/h3_fedprox/s*" "results/h3_scaffold/s*" "results/h3_krum/s*" "results/h3_fedadam/s*" "results/h3_fedfv/s*" "results/h3_qfedavg/s*" \
+  --labels "Meta-Aggregator" "FedAvg" "FedProx" "SCAFFOLD" "Krum" "FedAdam" "FedFV" "qFedAvg" \
+  -o results/hypothesis3_results
+```
+
+---
+
+### Hypothesis 4: Multi-Objective Pareto vs. Accuracy-Only Objective
+
+```bash
+# 1. Run 30 Seeds for Multi-Objective Pareto (w_lat=1.0, w_eng=1.0)
+for seed in $(seq 42 71); do
+  conda run -n web python simulate_fl.py --data-dir data/iid -n 10 -r 10 --seed $seed -s hierarchical --w-lat 1.0 --w-eng 1.0 -o results/h4_multiobj/s${seed}
+done
+
+# 2. Run 30 Seeds for Accuracy-Only Objective (w_lat=0.0, w_eng=0.0)
+for seed in $(seq 42 71); do
+  conda run -n web python simulate_fl.py --data-dir data/iid -n 10 -r 10 --seed $seed -s hierarchical --accuracy-only -o results/h4_acconly/s${seed}
+done
+
+# 3. Paired Hypothesis Test & Pareto Comparison
+conda run -n web python compare_experiments.py \
+  --dirs "results/h4_multiobj/s*" "results/h4_acconly/s*" \
   --labels "Multi-Objective Pareto" "Accuracy-Only Baseline" \
-  -o results/pareto_comparison
-```
-
----
-
-### Workflow 2: Aggregator Comparison with a Frozen Trained Selector
-Train a client selector once, save its parameters, and evaluate different fixed aggregators holding the selector policy constant.
-
-```bash
-# Step 1: Train and Save Client Selector
-conda run -n web python simulate_fl.py \
-  --data-dir data/iid -n 10 -r 10 --seed 42 \
-  -s linucb \
-  --save-selector results/trained_selector.npz \
-  -o results/train_selector
-
-# Step 2: Evaluate Aggregators with Frozen Selector
-# A. Dynamic Meta-Aggregator + Frozen Selector
-conda run -n web python simulate_fl.py \
-  --data-dir data/iid -n 10 -r 5 --seed 42 \
-  -s hierarchical \
-  --load-selector results/trained_selector.npz --freeze-selector \
-  -o results/eval_meta_aggregator
-
-# B. Fixed FedAvg + Frozen Selector
-conda run -n web python simulate_fl.py \
-  --data-dir data/iid -n 10 -r 5 --seed 42 \
-  -s linucb -a fedavg \
-  --load-selector results/trained_selector.npz --freeze-selector \
-  -o results/eval_fedavg
-
-# C. Fixed FedProx + Frozen Selector
-conda run -n web python simulate_fl.py \
-  --data-dir data/iid -n 10 -r 5 --seed 42 \
-  -s linucb -a fedprox \
-  --load-selector results/trained_selector.npz --freeze-selector \
-  -o results/eval_fedprox
-
-# Step 3: Generate Multi-Strategy Comparison
-conda run -n web python compare_experiments.py \
-  --dirs results/eval_meta_aggregator results/eval_fedavg results/eval_fedprox \
-  --labels "Meta-Aggregator" "FedAvg" "FedProx" \
-  -o results/aggregator_ablation_comparison
-```
-
----
-
-### Workflow 3: Multi-Seed Statistical Hypothesis Testing
-Run multiple random seeds and perform paired $t$-test / Wilcoxon signed-rank analysis.
-
-```bash
-# Multi-seed runs for Strategy A
-for seed in 42 43 44; do
-  conda run -n web python simulate_fl.py --data-dir data/iid -n 10 -r 5 --seed $seed -s hierarchical -o results/stratA_s${seed}
-done
-
-# Multi-seed runs for Strategy B
-for seed in 42 43 44; do
-  conda run -n web python simulate_fl.py --data-dir data/iid -n 10 -r 5 --seed $seed -s linucb -a fedavg -o results/stratB_s${seed}
-done
-
-# Perform Paired Hypothesis Testing & Plot Shaded CIs
-conda run -n web python compare_experiments.py \
-  --dirs "results/stratA_s*" "results/stratB_s*" \
-  --labels "Hierarchical RL" "LinUCB + FedAvg" \
-  -o results/multi_seed_hypothesis_analysis
+  -o results/hypothesis4_results
 ```
 
 ---
@@ -154,5 +176,10 @@ Running `compare_experiments.py` populates the output folder with:
 - **`comparison_pareto_accuracy_vs_latency.png`**: 2D Accuracy vs Latency Pareto chart.
 - **`comparison_pareto_accuracy_vs_joint_cost.png`**: 2D Accuracy vs Energy-Delay Product (EDP) joint cost.
 - **`comparison_pareto_3d_accuracy_vs_energy_latency.png`**: 3D Tradeoff plot (Latency $\times$ Energy $\times$ Accuracy).
-- **`hypothesis_test_results.csv`**: Paired $t$-test statistic, $p$-value, and Wilcoxon signed-rank test results.
+- **`hypothesis_test_results.csv`**: Paired $t$-test statistic, $p$-value, and Wilcoxon signed-rank test results for:
+  1. Final Loss ($L_T$)
+  2. Final $F_2$ Score (Accuracy)
+  3. Total Energy
+  4. Total Latency
+  5. Round to 90% Target Accuracy
 - **`comparison_summary.csv`**: Aggregated final round metrics per strategy group.

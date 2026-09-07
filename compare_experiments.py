@@ -126,6 +126,21 @@ def aggregate_group_metrics(run_dirs):
     }
 
 
+def get_round_to_target_acc(run, target_ratio=0.90):
+    """Returns round index (1-based) where accuracy first achieves target_ratio * max_accuracy."""
+    if not run:
+        return np.nan
+    accs = [r.get("f2", r.get("accuracy", 0.0)) for r in run]
+    max_acc = max(accs) if accs else 0.0
+    if max_acc <= 0:
+        return float(len(run))
+    threshold = target_ratio * max_acc
+    for idx, acc in enumerate(accs):
+        if acc >= threshold:
+            return float(idx + 1)
+    return float(len(run))
+
+
 def perform_paired_hypothesis_testing(group_A_name, group_A_data, group_B_name, group_B_data):
     """
     Executes paired t-test (ttest_rel) and Wilcoxon signed-rank test across paired seeds.
@@ -153,7 +168,8 @@ def perform_paired_hypothesis_testing(group_A_name, group_A_data, group_B_name, 
         ("Final F1 Score", lambda run: run[-1].get("f1", np.nan)),
         ("Mean AUPRC", lambda run: float(np.mean([r.get("auprc", 0.0) for r in run if r.get("auprc") is not None]))),
         ("Total Latency", lambda run: float(np.sum([r.get("avg_comp_latency", 0.0) for r in run]))),
-        ("Total Energy", lambda run: float(np.sum([r.get("total_round_energy", 0.0) for r in run])))
+        ("Total Energy", lambda run: float(np.sum([r.get("total_round_energy", 0.0) for r in run]))),
+        ("Round to 90% Target Acc", lambda run: get_round_to_target_acc(run, target_ratio=0.90))
     ]
 
     results = []

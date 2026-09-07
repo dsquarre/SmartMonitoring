@@ -1213,33 +1213,35 @@ def get_selector_by_name(name: str, **kwargs) -> ClientSelector:
     """
     name_lower = (name or "random").lower()
     gamma = kwargs.get("gamma", 0.95)
+    gamma_meta = kwargs.get("gamma_meta", gamma)
+    gamma_sub = kwargs.get("gamma_sub", gamma)
 
     if name_lower == "random":
         return RandomClientSelector()
     elif name_lower in ["linucb", "d-linucb"]:
         env = kwargs.get("env")
         feature_dim = kwargs.get("feature_dim", 7)
-        agent = LinUCBAgent(feature_dim=feature_dim, gamma=gamma)
+        agent = LinUCBAgent(feature_dim=feature_dim, gamma=gamma_sub)
         return RLClientSelector(agent, env)
     elif name_lower in ["wls-ts", "wlsts", "thompson"]:
         env = kwargs.get("env")
         feature_dim = kwargs.get("feature_dim", 7)
-        agent = WLSTSAgent(feature_dim=feature_dim, gamma=gamma)
+        agent = WLSTSAgent(feature_dim=feature_dim, gamma=gamma_sub)
         return RLClientSelector(agent, env)
     elif name_lower in ["dqn"]:
         env = kwargs.get("env")
         feature_dim = kwargs.get("feature_dim", 7)
-        agent = DQNAgent(feature_dim=feature_dim, gamma=gamma)
+        agent = DQNAgent(feature_dim=feature_dim, gamma=gamma_sub)
         return RLClientSelector(agent, env)
     elif name_lower == "hierarchical":
         env = kwargs.get("env")
-        meta_agent = kwargs.get("meta_agent") or MetaAggregatorAgent(feature_dim=20, gamma=gamma)
-        sub_agent = kwargs.get("sub_agent") or LinUCBAgent(feature_dim=14, gamma=gamma)
+        meta_agent = kwargs.get("meta_agent") or MetaAggregatorAgent(feature_dim=20, gamma=gamma_meta)
+        sub_agent = kwargs.get("sub_agent") or LinUCBAgent(feature_dim=14, gamma=gamma_sub)
         return HierarchicalFLSelector(meta_agent=meta_agent, sub_agent=sub_agent, env=env)
     elif name_lower in ["oort", "oort_hierarchical", "simple_hierarchical"]:
         env = kwargs.get("env")
-        meta_agent = kwargs.get("meta_agent") or MetaAggregatorAgent(feature_dim=4, gamma=gamma)
-        sub_agent = kwargs.get("sub_agent") or LinUCBAgent(feature_dim=11, gamma=gamma)
+        meta_agent = kwargs.get("meta_agent") or MetaAggregatorAgent(feature_dim=4, gamma=gamma_meta)
+        sub_agent = kwargs.get("sub_agent") or LinUCBAgent(feature_dim=11, gamma=gamma_sub)
         return OortHierarchicalFLSelector(meta_agent=meta_agent, sub_agent=sub_agent, env=env)
     else:
         print(f"[Selector Warning] Unknown selector strategy '{name}'. Defaulting to RandomClientSelector.")
