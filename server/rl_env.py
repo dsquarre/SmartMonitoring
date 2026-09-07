@@ -37,10 +37,13 @@ class FederatedEnv:
         self.kappa = kappa
         self.cycles_per_sample = cycles_per_sample
         
-        # Online running normalizers for latency, energy, and local loss
+        # Online running normalizers for latency, energy, local loss, global acc delta, global eng, global lat
         self.lat_normalizer = RunningNormalizer(alpha=0.05)
         self.eng_normalizer = RunningNormalizer(alpha=0.05)
         self.loss_normalizer = RunningNormalizer(alpha=0.05)
+        self.acc_delta_normalizer = RunningNormalizer(alpha=0.05)
+        self.global_eng_normalizer = RunningNormalizer(alpha=0.05)
+        self.global_lat_normalizer = RunningNormalizer(alpha=0.05)
 
     def compute_client_cost(self, numeric_id, samples, actual_comp_latency=None, actual_measured_energy=None, measured_roundtrip=None):
         profile = self.profiles[numeric_id]
@@ -70,37 +73,32 @@ class FederatedEnv:
             "E_total": E_train + E_trans
         }
 
+    def calculate_meta_reward(self, global_acc_delta: float, total_round_energy: float, round_latency: float) -> float:
+        """
+        Meta-Aggregator Reward r_t = 0.5 * (tanh(10 * z_W(ΔAcc_t) - z_W(E_t) - z_W(L_t)) + 1)
+        """
+        z_acc_delta = self.acc_delta_normalizer.normalize(global_acc_delta)
+        z_eng = self.global_eng_normalizer.normalize(total_round_energy)
+        z_lat = self.global_lat_normalizer.normalize(round_latency)
+
+        raw_r = 10.0 * z_acc_delta - z_eng - z_lat
+        return float(0.5 * (np.tanh(raw_r) + 1.0))
+
     def calculate_reward(self, selected_metrics, global_loss_delta, local_losses, 
                          w_perf=10.0, w_local=1.0, w_lat=0.1, w_eng=1.0, w_fair=0.5):
-        # Latency is determined by the slowest client (straggler)
         max_latency = max(m["t_total"] for m in selected_metrics.values()) if selected_metrics else 0.0
-        
-        # Total energy is sum across selected clients
         total_energy = sum(m["E_total"] for m in selected_metrics.values()) if selected_metrics else 0.0
-        
-        # Performance/loss statistics
         avg_local_loss = np.mean(local_losses) if local_losses else 1.0
-        loss_variance = np.var(local_losses) if len(local_losses) > 1 else 0.0
 
-        # Standardize metric terms dynamically using online running Welford statistics
-        norm_lat = self.lat_normalizer.normalize(max_latency)
-        norm_eng = self.eng_normalizer.normalize(total_energy)
-        norm_loss = self.loss_normalizer.normalize(avg_local_loss)
-
-        # Multi-objective Reward formulation
-        raw_reward = (w_perf * global_loss_delta) - (w_local * norm_loss) - (w_lat * norm_lat) - (w_eng * norm_eng) - (w_fair * loss_variance)
-        norm_reward = float(np.tanh(raw_reward / 10.0))
-        return norm_reward
+        return self.calculate_meta_reward(global_loss_delta, total_energy, max_latency)
 
     def calculate_vector_rewards(self, client_ids, selected_ids, selected_metrics, global_loss_delta, 
                                  client_losses, staleness_dict=None,
-                                 w_perf=10.0, w_local=1.0, w_lat=0.1, w_eng=1.0, w_stale=0.05):
+                                 w_L=1.0, w_E=1.0, w_stale=0.05, global_acc_delta=None,
+                                 total_round_energy=None, round_latency=None):
         """
-        Calculates per-client individual reward vector and global composite reward scalar.
-        
-        Returns:
-            client_rewards: Dict[str, float] mapping client_id -> individual reward.
-            scalar_reward: float total reward scalar.
+        Calculates per-client sub-controller reward r_{t, i} = 0.5 * (tanh(z_W(loss) - w_L * z_W(lat) - w_E * z_W(eng)) + 1)
+        and meta-aggregator reward r_t.
         """
         staleness_dict = staleness_dict or {}
         client_rewards = {}
@@ -110,20 +108,27 @@ class FederatedEnv:
                 m = selected_metrics[cid]
                 c_loss = client_losses.get(cid, 1.0)
                 
-                # Standardize individual client metrics dynamically
-                norm_loss = self.loss_normalizer.normalize(c_loss)
-                norm_lat = self.lat_normalizer.normalize(m.get("t_total", 0.0))
-                norm_eng = self.eng_normalizer.normalize(m.get("E_total", 0.0))
+                z_loss = self.loss_normalizer.normalize(c_loss)
+                z_lat = self.lat_normalizer.normalize(m.get("t_total", 0.0))
+                z_eng = self.eng_normalizer.normalize(m.get("E_total", 0.0))
 
-                # Selected client reward using standardized metrics
-                r_i = (w_perf * global_loss_delta) - (w_local * norm_loss) - (w_lat * norm_lat) - (w_eng * norm_eng)
+                raw_r = z_loss - (w_L * z_lat) - (w_E * z_eng)
+                r_i = 0.5 * (np.tanh(raw_r) + 1.0)
             else:
-                # Unselected client: penalty proportional to staleness to discourage starvation
                 stale_rounds = staleness_dict.get(cid, 0)
-                r_i = - (w_stale * stale_rounds)
-            client_rewards[cid] = float(np.tanh(r_i / 10.0))
+                raw_r = - (w_stale * stale_rounds)
+                r_i = 0.5 * (np.tanh(raw_r) + 1.0)
+            client_rewards[cid] = float(r_i)
 
-        scalar_reward = float(np.tanh(sum(client_rewards.values()) / 10.0))
-        return client_rewards, scalar_reward
+        scalar_reward = float(np.mean(list(client_rewards.values()))) if client_rewards else 0.5
+
+        if global_acc_delta is not None and total_round_energy is not None and round_latency is not None:
+            meta_reward = self.calculate_meta_reward(global_acc_delta, total_round_energy, round_latency)
+        else:
+            tot_eng = sum(m.get("E_total", 0.0) for m in selected_metrics.values()) if selected_metrics else 0.0
+            max_lat = max(m.get("t_total", 0.0) for m in selected_metrics.values()) if selected_metrics else 0.0
+            meta_reward = self.calculate_meta_reward(global_loss_delta, tot_eng, max_lat)
+
+        return client_rewards, scalar_reward, meta_reward
 
 

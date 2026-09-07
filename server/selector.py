@@ -569,9 +569,13 @@ class RLClientSelector(ClientSelector):
             self.client_has_telemetry[cid] = 1.0
 
         if hasattr(self.env, "calculate_vector_rewards"):
-            c_rewards, reward = self.env.calculate_vector_rewards(
+            global_acc_delta = round_summary.get("global_acc_delta", global_loss_delta)
+            tot_eng = round_summary.get("total_round_energy", 0.0)
+            avg_lat = round_summary.get("avg_comp_latency", 0.0)
+            c_rewards, reward, _ = self.env.calculate_vector_rewards(
                 self.last_client_ids, selected_ids, selected_metrics,
-                global_loss_delta, client_losses, self.client_staleness
+                global_loss_delta, client_losses, self.client_staleness,
+                global_acc_delta=global_acc_delta, total_round_energy=tot_eng, round_latency=avg_lat
             )
             vector_rewards = {i: c_rewards[cid] for i, cid in enumerate(self.last_client_ids) if cid in c_rewards}
         else:
@@ -903,9 +907,13 @@ class HierarchicalFLSelector(ClientSelector):
             self.client_has_telemetry[cid] = 1.0
 
         if hasattr(self.env, "calculate_vector_rewards"):
-            c_rewards, scalar_reward = self.env.calculate_vector_rewards(
+            global_acc_delta = round_summary.get("global_acc_delta", global_loss_delta)
+            tot_eng = round_summary.get("total_round_energy", 0.0)
+            avg_lat = round_summary.get("avg_comp_latency", 0.0)
+            c_rewards, scalar_reward, meta_reward = self.env.calculate_vector_rewards(
                 self.last_client_ids, selected_ids, selected_metrics,
-                global_loss_delta, client_losses, self.client_staleness
+                global_loss_delta, client_losses, self.client_staleness,
+                global_acc_delta=global_acc_delta, total_round_energy=tot_eng, round_latency=avg_lat
             )
             vector_rewards = {i: c_rewards[cid] for i, cid in enumerate(self.last_client_ids) if cid in c_rewards}
         else:
@@ -913,15 +921,16 @@ class HierarchicalFLSelector(ClientSelector):
                 {client_id_map.get(cid, 0): m for cid, m in selected_metrics.items()},
                 global_loss_delta, local_losses
             )
+            meta_reward = scalar_reward
             vector_rewards = {}
 
         print(f"[RL Environment] Round {round_summary.get('round', 1)} Stats:")
         print(f"  - Chosen Aggregation Strategy: {self.last_chosen_agg}")
         print(f"  - Delta Global Loss: {global_loss_delta:.4f}")
-        print(f"  - Calculated Reward: {scalar_reward:.4f}")
+        print(f"  - Calculated Sub-Reward: {scalar_reward:.4f} | Meta-Reward: {meta_reward:.4f}")
 
         if self.last_global_state is not None:
-            self.meta_agent.update(self.last_global_state, self.last_agg_idx, scalar_reward)
+            self.meta_agent.update(self.last_global_state, self.last_agg_idx, meta_reward)
 
         next_context = {
             "round": round_summary.get("round", 1),
