@@ -73,7 +73,7 @@ class LinUCBAgent(BaseRLAgent):
     to continuously adapt to model loss convergence while maintaining fast O(1) execution time.
     Supports dynamic feature dimensions (e.g. 8 for standalone RL, 15 for Hierarchical FL).
     """
-    def __init__(self, alpha: float = 1.0, gamma: float = 0.95, feature_dim: int = 8):
+    def __init__(self, alpha: float = 1.0, gamma: float = 0.95, feature_dim: int = 7):
         self.alpha = alpha
         self.gamma = gamma
         self.feature_dim = feature_dim
@@ -146,7 +146,7 @@ class WLSTSAgent(BaseRLAgent):
     Applies exponential discounting factor gamma to past observations and samples parameter vector
     tilde_theta ~ N(hat_theta, sigma^2 * A^-1) for posterior-driven exploration.
     """
-    def __init__(self, gamma: float = 0.95, sigma: float = 0.25, feature_dim: int = 8):
+    def __init__(self, gamma: float = 0.95, sigma: float = 0.25, feature_dim: int = 7):
         self.gamma = gamma
         self.sigma = sigma
         self.feature_dim = feature_dim
@@ -217,9 +217,9 @@ class WLSTSAgent(BaseRLAgent):
 class DQNAgent(BaseRLAgent):
     """
     TensorFlow/Keras Deep Q-Network Agent for client selection.
-    Supports both feature_dim = 8 (Standalone mode) and feature_dim = 15 (Hierarchical mode).
+    Supports both feature_dim = 7 (Standalone mode) and feature_dim = 14 (Hierarchical mode).
     """
-    def __init__(self, feature_dim: int = 8, hidden_dim: int = 32, lr: float = 0.001, gamma: float = 0.9, epsilon: float = 0.1):
+    def __init__(self, feature_dim: int = 7, hidden_dim: int = 32, lr: float = 0.001, gamma: float = 0.9, epsilon: float = 0.1):
         self.feature_dim = feature_dim
         self.hidden_dim = hidden_dim
         self.lr = lr
@@ -305,6 +305,83 @@ class DQNAgent(BaseRLAgent):
             print("[DQN Agent] Updated target network weights.")
 
 
+def compute_selection_diversity(selection_history: List[List[str]], client_ids: List[str], window_size: int = 10) -> float:
+    """
+    Computes normalized Shannon entropy diversity_t = H / log(N) over trailing window W of rounds.
+    1.0 means policy cycles through pool evenly; near 0.0 means hammering same clients.
+    """
+    N = len(client_ids)
+    if N <= 1 or not selection_history:
+        return 1.0
+
+    window = selection_history[-window_size:]
+    total_selections = sum(len(s) for s in window)
+    if total_selections == 0:
+        return 1.0
+
+    counts = {cid: 0 for cid in client_ids}
+    for round_selected in window:
+        for cid in round_selected:
+            if cid in counts:
+                counts[cid] += 1
+
+    probs = [counts[cid] / float(total_selections) for cid in client_ids]
+    H = 0.0
+    for p in probs:
+        if p > 0:
+            H -= p * np.log(p)
+
+    max_H = np.log(N)
+    if max_H <= 0:
+        return 1.0
+    diversity = float(H / max_H)
+    return float(np.clip(diversity, 0.0, 1.0))
+
+
+def build_base_client_features(
+    client_ids: List[str],
+    context: Dict[str, Any],
+    client_ema_loss: Dict[str, float],
+    ema_global_loss: float,
+    client_ema_latency: Dict[str, float],
+    client_ema_energy: Dict[str, float],
+    client_staleness: Dict[str, int],
+    client_dropped: Dict[str, float],
+    client_grad_sim: Dict[str, float],
+    selection_history: List[List[str]],
+    window_size: int = 10
+) -> np.ndarray:
+    """
+    Builds N x 7 feature matrix for clients:
+    [loss_diff, EMA_latency, EMA_energy, stale_count, drop_flag, grad_sim, entropy_diversity]
+    """
+    diversity_t = compute_selection_diversity(selection_history, client_ids, window_size)
+    client_losses = context.get("client_losses", {})
+
+    state_list = []
+    for cid in client_ids:
+        c_loss_ema = client_ema_loss.get(cid, float(client_losses.get(cid, 1.0)))
+        loss_diff = float(c_loss_ema - ema_global_loss)
+
+        lat = float(client_ema_latency.get(cid, 0.0))
+        eng = float(client_ema_energy.get(cid, 0.0))
+        staleness = float(client_staleness.get(cid, 0))
+        drop_flag = float(client_dropped.get(cid, 0.0))
+        grad_sim = float(client_grad_sim.get(cid, 0.0))
+        entropy_feat = float(diversity_t)
+
+        state_list.append([
+            loss_diff,
+            lat,
+            eng,
+            staleness,
+            drop_flag,
+            grad_sim,
+            entropy_feat
+        ])
+    return np.array(state_list, dtype=np.float32)
+
+
 class RLClientSelector(ClientSelector):
     def __init__(self, agent: BaseRLAgent, env: Any):
         self.agent = agent
@@ -312,30 +389,36 @@ class RLClientSelector(ClientSelector):
         self.last_state = None
         self.last_action = None
         self.last_client_ids = []
-        
+
         # State tracking buffers across rounds
         self.client_staleness: Dict[str, int] = {}
         self.client_ema_latency: Dict[str, float] = {}
         self.client_ema_energy: Dict[str, float] = {}
-        self.client_has_telemetry: Dict[str, float] = {}  # 1.0 if empirical metrics exist, 0.0 if default
+        self.client_has_telemetry: Dict[str, float] = {}
+        self.client_ema_loss: Dict[str, float] = {}
+        self.ema_global_loss: float = 1.0
+        self.client_dropped: Dict[str, float] = {}
+        self.client_grad_sim: Dict[str, float] = {}
+        self.selection_history: List[List[str]] = []
+        self.window_size: int = 10
 
     def select_clients(self, client_ids: List[str], k: int, context: Dict[str, Any] = None) -> List[str]:
         if not client_ids:
             return []
-        
+
         context = context or {}
         active_clients = context.get("active_clients", client_ids)
         active_indices = [i for i, cid in enumerate(client_ids) if cid in active_clients]
-        
+
         context["active_indices"] = active_indices
         context["env"] = self.env
-        
-        # Construct state vector (N x M feature matrix)
+
+        # Construct state vector (N x 7 feature matrix)
         state = self._build_state(client_ids, context)
         self.last_state = state
         self.last_client_ids = client_ids
 
-        # Get action from agent (returns indices into client_ids)
+        # Get action from agent
         selected_indices = self.agent.get_action(state, len(client_ids), k, context=context)
         self.last_action = selected_indices
 
@@ -350,44 +433,24 @@ class RLClientSelector(ClientSelector):
         return selected_ids
 
     def _build_state(self, client_ids: List[str], context: Dict[str, Any]) -> np.ndarray:
-        client_losses = context.get("client_losses", {})
-        avg_loss = np.mean(list(client_losses.values())) if client_losses else 1.0
-        
-        state_list = []
-        for i, cid in enumerate(client_ids):
-            num_id = context.get("client_id_map", {}).get(cid, i)
-            profile = self.env.profiles.get(num_id, {"cpu_frequency": 2.0e9})
-            
-            # Dynamic features
-            samples = context.get("client_samples", {}).get(cid, 1000) / 1000.0
-            last_loss = float(client_losses.get(cid, 1.0))
-            loss_staleness = float(avg_loss - last_loss)
-            
-            # Telemetry metrics (default to 0.0 if not available per AGENTS.md rule)
-            lat = float(self.client_ema_latency.get(cid, 0.0))
-            eng = float(self.client_ema_energy.get(cid, 0.0))
-            has_telemetry = float(self.client_has_telemetry.get(cid, 0.0))
-            
-            staleness = float(self.client_staleness.get(cid, 0))
-            bias = 1.0
-            
-            state_list.append([
-                last_loss,
-                loss_staleness,
-                lat,
-                eng,
-                has_telemetry,
-                staleness,
-                samples,
-                bias
-            ])
-        return np.array(state_list, dtype=np.float32)
+        return build_base_client_features(
+            client_ids, context,
+            self.client_ema_loss, self.ema_global_loss,
+            self.client_ema_latency, self.client_ema_energy,
+            self.client_staleness, self.client_dropped,
+            self.client_grad_sim, self.selection_history,
+            window_size=self.window_size
+        )
 
     def update_policy(self, round_summary: Dict[str, Any]):
         if self.last_state is None or self.last_action is None:
             return
 
         selected_ids = round_summary.get("selected_ids", [])
+        self.selection_history.append(selected_ids)
+        if len(self.selection_history) > self.window_size * 2:
+            self.selection_history = self.selection_history[-self.window_size:]
+
         client_id_map = round_summary.get("client_id_map", {})
         client_samples = round_summary.get("client_samples", {})
         client_losses = round_summary.get("client_losses", {})
@@ -397,7 +460,26 @@ class RLClientSelector(ClientSelector):
         roundtrips = round_summary.get("client_roundtrips", {})
         latencies = round_summary.get("client_latencies", {})
         energies = round_summary.get("client_energies", {})
-        
+        dropped_clients = set(round_summary.get("dropped_clients", []))
+        client_grad_sims = round_summary.get("client_grad_sims", {})
+
+        alpha = 0.3
+        if client_losses:
+            for cid, c_loss in client_losses.items():
+                c_loss = float(c_loss)
+                if cid in self.client_ema_loss:
+                    self.client_ema_loss[cid] = (1.0 - alpha) * self.client_ema_loss[cid] + alpha * c_loss
+                else:
+                    self.client_ema_loss[cid] = c_loss
+            curr_global = float(np.mean(list(client_losses.values())))
+            self.ema_global_loss = (1.0 - alpha) * self.ema_global_loss + alpha * curr_global
+
+        for cid in self.last_client_ids:
+            self.client_dropped[cid] = 1.0 if cid in dropped_clients else 0.0
+
+        for cid, sim in client_grad_sims.items():
+            self.client_grad_sim[cid] = float(sim)
+
         selected_metrics = {}
         for cid in selected_ids:
             num_id = client_id_map.get(cid, 0)
@@ -409,20 +491,16 @@ class RLClientSelector(ClientSelector):
                 num_id, samples, comp_lat, energy, indiv_rt
             )
             selected_metrics[cid] = cost_dict
-            
-            # Update EMA metrics and telemetry flag for selected clients
-            alpha = 0.3
+
             self.client_ema_latency[cid] = (1 - alpha) * self.client_ema_latency.get(cid, 0.0) + alpha * cost_dict["t_total"]
             self.client_ema_energy[cid] = (1 - alpha) * self.client_ema_energy.get(cid, 0.0) + alpha * cost_dict["E_total"]
             self.client_has_telemetry[cid] = 1.0
 
-        # Compute per-client vector rewards if supported by env
         if hasattr(self.env, "calculate_vector_rewards"):
             c_rewards, reward = self.env.calculate_vector_rewards(
-                self.last_client_ids, selected_ids, selected_metrics, 
+                self.last_client_ids, selected_ids, selected_metrics,
                 global_loss_delta, client_losses, self.client_staleness
             )
-            # Map client_id -> index reward dictionary
             vector_rewards = {i: c_rewards[cid] for i, cid in enumerate(self.last_client_ids) if cid in c_rewards}
         else:
             reward = self.env.calculate_reward(
@@ -434,7 +512,7 @@ class RLClientSelector(ClientSelector):
         print(f"[RL Environment] Round {round_summary.get('round', 1)} Stats:")
         print(f"  - Delta Global Loss: {global_loss_delta:.4f}")
         print(f"  - Calculated Reward: {reward:.4f}")
-        
+
         next_context = {
             "round": round_summary.get("round", 1),
             "rounds_left": round_summary.get("rounds_left", 0),
@@ -444,11 +522,12 @@ class RLClientSelector(ClientSelector):
             "active_clients": active_clients
         }
         next_state = self._build_state(self.last_client_ids, next_context)
-        
+
         update_context = next_context.copy()
         update_context["vector_rewards"] = vector_rewards
-        
+
         self.agent.update(self.last_state, self.last_action, reward, next_state, context=update_context)
+
 
 class MetaAggregatorAgent:
     """
@@ -494,7 +573,6 @@ class MetaAggregatorAgent:
                 uncert = float(np.sqrt((x.T @ A_inv @ x).item()))
                 scores[k] = exp_reward + self.alpha * uncert
 
-            # Random tie-breaking among maximum score candidates
             max_score = np.max(scores)
             candidates = np.where(np.isclose(scores, max_score, atol=1e-5))[0]
             best_idx = int(np.random.choice(candidates))
@@ -506,10 +584,10 @@ class MetaAggregatorAgent:
 
     def update(self, global_state: np.ndarray, action_idx: int, reward: float):
         x = global_state.reshape(-1, 1)
-        # Apply exponential discounting factor gamma to past observations
         self.A[action_idx] = self.gamma * self.A[action_idx] + (1.0 - self.gamma) * np.eye(self.feature_dim, dtype=np.float64) + (x @ x.T)
         self.b[action_idx] = self.gamma * self.b[action_idx] + reward * x
         print(f"[Meta-Controller ({self.mode.upper()})] Updated weights for strategy '{self.STRATEGIES[action_idx]}' (gamma={self.gamma}).")
+
 
 class HierarchicalFLSelector(ClientSelector):
     """
@@ -519,9 +597,9 @@ class HierarchicalFLSelector(ClientSelector):
     """
     def __init__(self, meta_agent: MetaAggregatorAgent = None, sub_agent: LinUCBAgent = None, env: Any = None):
         self.meta_agent = meta_agent or MetaAggregatorAgent()
-        self.sub_agent = sub_agent or LinUCBAgent()
+        self.sub_agent = sub_agent or LinUCBAgent(feature_dim=14)
         self.env = env
-        
+
         self.last_global_state = None
         self.last_agg_idx = 0
         self.last_chosen_agg = "FedAvg"
@@ -533,16 +611,21 @@ class HierarchicalFLSelector(ClientSelector):
         self.client_ema_latency: Dict[str, float] = {}
         self.client_ema_energy: Dict[str, float] = {}
         self.client_has_telemetry: Dict[str, float] = {}
+        self.client_ema_loss: Dict[str, float] = {}
+        self.ema_global_loss: float = 1.0
+        self.client_dropped: Dict[str, float] = {}
+        self.client_grad_sim: Dict[str, float] = {}
+        self.selection_history: List[List[str]] = []
+        self.window_size: int = 10
 
     def select_clients(self, client_ids: List[str], k: int, context: Dict[str, Any] = None) -> List[str]:
         if not client_ids:
             return []
-        
+
         context = context or {}
         active_clients = context.get("active_clients", client_ids)
         active_indices = [i for i, cid in enumerate(client_ids) if cid in active_clients]
-        
-        # Step 1: Level 1 Meta-Controller selects Aggregation Strategy
+
         global_state = self._build_global_state(context)
         self.last_global_state = global_state
         agg_idx, chosen_agg = self.meta_agent.select_strategy(global_state)
@@ -550,10 +633,9 @@ class HierarchicalFLSelector(ClientSelector):
         self.last_chosen_agg = chosen_agg
         context["chosen_aggregation"] = chosen_agg
 
-        # Step 2: Level 2 Sub-Controller selects Top-K Clients conditioned on chosen_agg
         context["active_indices"] = active_indices
         context["env"] = self.env
-        
+
         client_state = self._build_conditioned_client_state(client_ids, agg_idx, context)
         self.last_client_state = client_state
         self.last_client_ids = client_ids
@@ -561,7 +643,6 @@ class HierarchicalFLSelector(ClientSelector):
         selected_indices = self.sub_agent.get_action(client_state, len(client_ids), k, context=context)
         self.last_action = selected_indices
 
-        # Update staleness counters
         selected_ids = [client_ids[idx] for idx in selected_indices]
         for cid in client_ids:
             if cid in selected_ids:
@@ -575,55 +656,43 @@ class HierarchicalFLSelector(ClientSelector):
         current_r = context.get("round", 1)
         total_r = max(1, current_r + context.get("rounds_left", 10))
         progress = float(current_r / total_r)
-        
+
         global_loss_delta = float(context.get("global_loss_delta", 0.0))
         client_losses = list(context.get("client_losses", {}).values())
         loss_var = float(np.var(client_losses)) if len(client_losses) > 1 else 0.0
-        
+
         avg_lat = float(np.mean(list(self.client_ema_latency.values()))) if self.client_ema_latency else 0.0
         poison_alert = float(context.get("poison_alert_flag", 0.0))
-        
+
         return np.array([progress, global_loss_delta, loss_var, avg_lat, poison_alert], dtype=np.float32)
 
     def _build_conditioned_client_state(self, client_ids: List[str], agg_idx: int, context: Dict[str, Any]) -> np.ndarray:
-        client_losses = context.get("client_losses", {})
-        avg_loss = np.mean(list(client_losses.values())) if client_losses else 1.0
-        
-        # 7-dimensional one-hot vector for aggregation strategy
+        base_state = build_base_client_features(
+            client_ids, context,
+            self.client_ema_loss, self.ema_global_loss,
+            self.client_ema_latency, self.client_ema_energy,
+            self.client_staleness, self.client_dropped,
+            self.client_grad_sim, self.selection_history,
+            window_size=self.window_size
+        )
+
         one_hot_agg = [0.0] * len(MetaAggregatorAgent.STRATEGIES)
         if 0 <= agg_idx < len(one_hot_agg):
             one_hot_agg[agg_idx] = 1.0
 
-        state_list = []
-        for i, cid in enumerate(client_ids):
-            num_id = context.get("client_id_map", {}).get(cid, i)
-            profile = self.env.profiles.get(num_id, {"cpu_frequency": 2.0e9})
-            
-            samples = context.get("client_samples", {}).get(cid, 1000) / 1000.0
-            last_loss = float(client_losses.get(cid, 1.0))
-            loss_staleness = float(avg_loss - last_loss)
-            
-            # Telemetry metrics (default to 0.0 if not available per AGENTS.md rule)
-            lat = float(self.client_ema_latency.get(cid, 0.0))
-            eng = float(self.client_ema_energy.get(cid, 0.0))
-            has_telemetry = float(self.client_has_telemetry.get(cid, 0.0))
-            
-            staleness = float(self.client_staleness.get(cid, 0))
-            bias = 1.0
-            
-            # 8 base features + 7 one-hot features = 15 total features
-            row = [
-                last_loss, loss_staleness, lat, eng, has_telemetry, staleness, samples, bias
-            ] + one_hot_agg
-            state_list.append(row)
-            
-        return np.array(state_list, dtype=np.float32)
+        one_hot_matrix = np.tile(one_hot_agg, (len(client_ids), 1))
+        conditioned_state = np.hstack([base_state, one_hot_matrix])
+        return conditioned_state.astype(np.float32)
 
     def update_policy(self, round_summary: Dict[str, Any]):
         if self.last_client_state is None or self.last_action is None:
             return
 
         selected_ids = round_summary.get("selected_ids", [])
+        self.selection_history.append(selected_ids)
+        if len(self.selection_history) > self.window_size * 2:
+            self.selection_history = self.selection_history[-self.window_size:]
+
         client_id_map = round_summary.get("client_id_map", {})
         client_samples = round_summary.get("client_samples", {})
         client_losses = round_summary.get("client_losses", {})
@@ -633,7 +702,26 @@ class HierarchicalFLSelector(ClientSelector):
         roundtrips = round_summary.get("client_roundtrips", {})
         latencies = round_summary.get("client_latencies", {})
         energies = round_summary.get("client_energies", {})
-        
+        dropped_clients = set(round_summary.get("dropped_clients", []))
+        client_grad_sims = round_summary.get("client_grad_sims", {})
+
+        alpha = 0.3
+        if client_losses:
+            for cid, c_loss in client_losses.items():
+                c_loss = float(c_loss)
+                if cid in self.client_ema_loss:
+                    self.client_ema_loss[cid] = (1.0 - alpha) * self.client_ema_loss[cid] + alpha * c_loss
+                else:
+                    self.client_ema_loss[cid] = c_loss
+            curr_global = float(np.mean(list(client_losses.values())))
+            self.ema_global_loss = (1.0 - alpha) * self.ema_global_loss + alpha * curr_global
+
+        for cid in self.last_client_ids:
+            self.client_dropped[cid] = 1.0 if cid in dropped_clients else 0.0
+
+        for cid, sim in client_grad_sims.items():
+            self.client_grad_sim[cid] = float(sim)
+
         selected_metrics = {}
         for cid in selected_ids:
             num_id = client_id_map.get(cid, 0)
@@ -645,15 +733,14 @@ class HierarchicalFLSelector(ClientSelector):
                 num_id, samples, comp_lat, energy, indiv_rt
             )
             selected_metrics[cid] = cost_dict
-            
-            alpha = 0.3
+
             self.client_ema_latency[cid] = (1 - alpha) * self.client_ema_latency.get(cid, 0.0) + alpha * cost_dict["t_total"]
             self.client_ema_energy[cid] = (1 - alpha) * self.client_ema_energy.get(cid, 0.0) + alpha * cost_dict["E_total"]
             self.client_has_telemetry[cid] = 1.0
 
         if hasattr(self.env, "calculate_vector_rewards"):
             c_rewards, scalar_reward = self.env.calculate_vector_rewards(
-                self.last_client_ids, selected_ids, selected_metrics, 
+                self.last_client_ids, selected_ids, selected_metrics,
                 global_loss_delta, client_losses, self.client_staleness
             )
             vector_rewards = {i: c_rewards[cid] for i, cid in enumerate(self.last_client_ids) if cid in c_rewards}
@@ -669,11 +756,9 @@ class HierarchicalFLSelector(ClientSelector):
         print(f"  - Delta Global Loss: {global_loss_delta:.4f}")
         print(f"  - Calculated Reward: {scalar_reward:.4f}")
 
-        # Update Level 1 Meta-Controller Policy
         if self.last_global_state is not None:
             self.meta_agent.update(self.last_global_state, self.last_agg_idx, scalar_reward)
 
-        # Update Level 2 Sub-Controller Policy
         next_context = {
             "round": round_summary.get("round", 1),
             "rounds_left": round_summary.get("rounds_left", 0),
@@ -684,7 +769,7 @@ class HierarchicalFLSelector(ClientSelector):
             "vector_rewards": vector_rewards
         }
         next_state = self._build_conditioned_client_state(self.last_client_ids, self.last_agg_idx, next_context)
-        
+
         self.sub_agent.update(self.last_client_state, self.last_action, scalar_reward, next_state, context=next_context)
 
 
@@ -698,22 +783,23 @@ def get_selector_by_name(name: str, **kwargs) -> ClientSelector:
         return RandomClientSelector()
     elif name_lower in ["linucb", "d-linucb"]:
         env = kwargs.get("env")
-        feature_dim = kwargs.get("feature_dim", 8)
+        feature_dim = kwargs.get("feature_dim", 7)
         agent = LinUCBAgent(feature_dim=feature_dim)
         return RLClientSelector(agent, env)
     elif name_lower in ["wls-ts", "wlsts", "thompson"]:
         env = kwargs.get("env")
-        feature_dim = kwargs.get("feature_dim", 8)
+        feature_dim = kwargs.get("feature_dim", 7)
         agent = WLSTSAgent(feature_dim=feature_dim)
         return RLClientSelector(agent, env)
     elif name_lower == "dqn":
         env = kwargs.get("env")
-        agent = DQNAgent()
+        feature_dim = kwargs.get("feature_dim", 7)
+        agent = DQNAgent(feature_dim=feature_dim)
         return RLClientSelector(agent, env)
     elif name_lower == "hierarchical":
         env = kwargs.get("env")
         meta_agent = kwargs.get("meta_agent") or MetaAggregatorAgent()
-        sub_agent = kwargs.get("sub_agent") or LinUCBAgent()
+        sub_agent = kwargs.get("sub_agent") or LinUCBAgent(feature_dim=14)
         return HierarchicalFLSelector(meta_agent=meta_agent, sub_agent=sub_agent, env=env)
     else:
         print(f"[Selector Warning] Unknown selector strategy '{name}'. Defaulting to RandomClientSelector.")

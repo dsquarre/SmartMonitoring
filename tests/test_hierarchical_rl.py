@@ -18,8 +18,8 @@ class TestHierarchicalRL(unittest.TestCase):
         }
         self.env = FederatedEnv(self.profiles)
         self.meta_agent = MetaAggregatorAgent(alpha=0.5, feature_dim=5)
-        # Note: Sub-agent receives 15 features (8 base + 7 one-hot aggregation modes)
-        self.sub_agent = LinUCBAgent(alpha=1.0, feature_dim=15)
+        # Note: Sub-agent receives 14 features (7 base + 7 one-hot aggregation modes)
+        self.sub_agent = LinUCBAgent(alpha=1.0, feature_dim=14)
         self.selector = HierarchicalFLSelector(
             meta_agent=self.meta_agent,
             sub_agent=self.sub_agent,
@@ -47,8 +47,8 @@ class TestHierarchicalRL(unittest.TestCase):
         self.assertEqual(len(selected_clients), 2)
         self.assertNotIn("client_3", selected_clients, "Action Masking must exclude offline client_3!")
         
-        # State vector dimension check for Level 2 (N x 15 matrix)
-        self.assertEqual(self.selector.last_client_state.shape, (4, 15))
+        # State vector dimension check for Level 2 (N x 14 matrix)
+        self.assertEqual(self.selector.last_client_state.shape, (4, 14))
 
     def test_policy_updates(self):
         context = {

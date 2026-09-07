@@ -23,8 +23,8 @@ class TestDQNSelector(unittest.TestCase):
         self.client_id_map = {cid: i for i, cid in enumerate(self.client_ids)}
 
     def test_standalone_dqn_selector(self):
-        dqn_agent_8d = DQNAgent(feature_dim=8, hidden_dim=16, lr=0.001)
-        selector = RLClientSelector(agent=dqn_agent_8d, env=self.env)
+        dqn_agent_7d = DQNAgent(feature_dim=7, hidden_dim=16, lr=0.001)
+        selector = RLClientSelector(agent=dqn_agent_7d, env=self.env)
         
         context = {
             "active_clients": ["client_0", "client_1", "client_2"],
@@ -52,15 +52,15 @@ class TestDQNSelector(unittest.TestCase):
         }
         
         selector.update_policy(round_summary)
-        self.assertGreater(len(dqn_agent_8d.replay_buffer), 0)
+        self.assertGreater(len(dqn_agent_7d.replay_buffer), 0)
 
     def test_hierarchical_dqn_selector(self):
         meta_agent = MetaAggregatorAgent(alpha=0.5, feature_dim=5)
-        dqn_agent_15d = DQNAgent(feature_dim=15, hidden_dim=16, lr=0.001)
+        dqn_agent_14d = DQNAgent(feature_dim=14, hidden_dim=16, lr=0.001)
         
         selector = HierarchicalFLSelector(
             meta_agent=meta_agent,
-            sub_agent=dqn_agent_15d,
+            sub_agent=dqn_agent_14d,
             env=self.env
         )
         
@@ -78,7 +78,7 @@ class TestDQNSelector(unittest.TestCase):
         selected = selector.select_clients(self.client_ids, k=2, context=context)
         self.assertEqual(len(selected), 2)
         self.assertNotIn("client_3", selected)
-        self.assertEqual(selector.last_client_state.shape, (4, 15))
+        self.assertEqual(selector.last_client_state.shape, (4, 14))
         
         round_summary = {
             "round": 1,
@@ -95,7 +95,7 @@ class TestDQNSelector(unittest.TestCase):
         }
         
         selector.update_policy(round_summary)
-        self.assertGreater(len(dqn_agent_15d.replay_buffer), 0)
+        self.assertGreater(len(dqn_agent_14d.replay_buffer), 0)
 
 if __name__ == "__main__":
     unittest.main()

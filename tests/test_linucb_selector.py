@@ -17,7 +17,7 @@ class TestLinUCBSelector(unittest.TestCase):
             3: {"cpu_frequency": 1.0e9, "tx_power": 0.4, "r_trans": 5e6},
         }
         self.env = FederatedEnv(self.profiles)
-        self.agent = LinUCBAgent(alpha=1.0, feature_dim=8)
+        self.agent = LinUCBAgent(alpha=1.0, feature_dim=7)
         self.selector = RLClientSelector(agent=self.agent, env=self.env)
         self.client_ids = ["client_0", "client_1", "client_2", "client_3"]
         self.client_id_map = {cid: i for i, cid in enumerate(self.client_ids)}

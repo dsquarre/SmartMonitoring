@@ -248,6 +248,43 @@ def run_simulation(args):
             # Clean memory after processing chunk
             tf.keras.backend.clear_session()
 
+        # Compute cosine gradient/weight update similarity grad_sim = cos(Delta_i, Delta_theta_t)
+        client_grad_sims = {}
+        try:
+            global_m = ServerModel()
+            global_m.model.load_weights(global_model_path)
+            g_weights = np.concatenate([v.numpy().flatten() for v in global_m.model.trainable_variables])
+            deltas_dict = {}
+
+            for item in client_data:
+                if aggregator.mode == "gradients":
+                    avg_grads, _, _, num_id, _, _ = item
+                    cid = [k for k, v in client_id_map.items() if v == num_id][0]
+                    flat_d = np.concatenate([g.flatten() for g in avg_grads])
+                    deltas_dict[cid] = flat_d
+                else:
+                    w_path, _, _, cid, _, _ = item
+                    cm = ClientModel(client_files[cid], batch_size=args.batch_size)
+                    cm.model.load_weights(w_path)
+                    c_weights = np.concatenate([v.numpy().flatten() for v in cm.model.trainable_variables])
+                    deltas_dict[cid] = c_weights - g_weights
+                    del cm
+
+            if deltas_dict:
+                avg_delta = np.mean(list(deltas_dict.values()), axis=0)
+                norm_avg = np.linalg.norm(avg_delta)
+                for cid, delta in deltas_dict.items():
+                    norm_d = np.linalg.norm(delta)
+                    if norm_d > 1e-8 and norm_avg > 1e-8:
+                        sim = float(np.dot(delta, avg_delta) / (norm_d * norm_avg))
+                    else:
+                        sim = 0.0
+                    client_grad_sims[cid] = sim
+            del global_m
+            tf.keras.backend.clear_session()
+        except Exception as e:
+            print(f"[GradSim Warning] Could not calculate gradient similarities: {e}")
+
         # Aggregation Phase
         print(f"[Aggregator ({aggregator.__class__.__name__})] Aggregating client updates...")
         if aggregator.mode == "gradients":
@@ -326,7 +363,9 @@ def run_simulation(args):
             "elapsed_round": elapsed_round,
             "client_roundtrips": {cid: elapsed_round for cid in selected_ids},
             "client_latencies": {cid: latencies[i] for i, cid in enumerate(selected_ids)},
-            "client_energies": {cid: energies[i] for i, cid in enumerate(selected_ids)}
+            "client_energies": {cid: energies[i] for i, cid in enumerate(selected_ids)},
+            "client_grad_sims": client_grad_sims,
+            "dropped_clients": []
         }
 
         selector.update_policy(round_summary)
