@@ -15,13 +15,22 @@ import csv
 import time
 import shutil
 import functools
+import warnings
+import logging
 import numpy as np
 
 # Override print to automatically flush stdout on every print statement
 print = functools.partial(print, flush=True)
 
-# Suppress verbose TensorFlow C++ logging
+# Suppress verbose TensorFlow C++ logging and Python UserWarnings
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", message=".*Skipping variable loading for optimizer.*")
+
+import tensorflow as tf
+tf.get_logger().setLevel(logging.ERROR)
+logging.getLogger('tensorflow').setLevel(logging.ERROR)
+
 
 
 # Ensure server and client directories are in sys.path for direct imports
