@@ -5,6 +5,7 @@ import asyncio
 from datetime import datetime
 from fastapi import FastAPI, Body, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 import tensorflow as tf
 from model import Model
 from collections import deque
@@ -143,7 +144,7 @@ def plot_metrics_local(round_history):
 
     # loss
     plt.figure(figsize=(8, 5))
-    plt.plot(rounds, [x.get("loss", x.get("total_loss", 0.0)) for x in round_history], marker='o', label='Loss')
+    plt.plot(rounds, [x.get("loss", x.get("loss", 0.0)) for x in round_history], marker='o', label='Loss')
     plt.xlabel("Federated Round")
     plt.ylabel("Loss")
     plt.title("Loss vs Federated Round")
@@ -154,7 +155,7 @@ def plot_metrics_local(round_history):
 
     # accuracy
     plt.figure(figsize=(8, 5))
-    plt.plot(rounds, [x.get("accuracy", x.get("anomaly_accuracy", 0.0)) for x in round_history], marker='o', label='Accuracy')
+    plt.plot(rounds, [x.get("accuracy", x.get("accuracy", 0.0)) for x in round_history], marker='o', label='Accuracy')
     plt.xlabel("Federated Round")
     plt.ylabel("Accuracy")
     plt.title("Accuracy vs Federated Round")
@@ -165,11 +166,13 @@ def plot_metrics_local(round_history):
 
     # F1 & ROC AUC
     plt.figure(figsize=(8, 5))
-    plt.plot(rounds, [x.get("f1", x.get("disease_f1", 0.0)) for x in round_history], marker='o', label='F1 Score')
-    plt.plot(rounds, [x.get("roc_auc", 0.5) for x in round_history], marker='s', label='ROC AUC')
+    plt.plot(rounds, [x.get("f1", 0.0) for x in round_history], marker='o', color='green', label='F1 Score')
+    plt.plot(rounds, [x.get("precision", 0.0) for x in round_history], marker='^', color='orange', label='Precision')
+    plt.plot(rounds, [x.get("recall", 0.0) for x in round_history], marker='v', color='teal', label='Recall')
+    plt.plot(rounds, [x.get("roc_auc", 0.5) for x in round_history], marker='s', color='purple', label='ROC AUC')
     plt.xlabel("Federated Round")
     plt.ylabel("Score")
-    plt.title("F1 Score & ROC AUC vs Federated Round")
+    plt.title("Binary Performance Metrics vs Federated Round")
     plt.legend()
     plt.grid(True)
     plt.savefig("f1_vs_round.png")
@@ -362,6 +365,7 @@ class FederatedServer:
             # Run Selector
             selected_ids = self.selector.select_clients(active_clients, K, context=context)
             selected_set = set(selected_ids)
+            await redis_async.set("fl:round:current_selected", json.dumps(selected_ids))
             print(f"Selected clients for training: {selected_ids}")
             
             # Sync active aggregator strategy if selector is hierarchical meta-controller
@@ -783,6 +787,135 @@ async def mock_s3_upload(key: str, request: Request):
         f.write(body)
     print(f"[Mock S3 Route] Saved uploaded file to {file_path} (size: {len(body)} bytes)")
     return {"status": "success"}
+
+
+# ----------------------------------------------------
+# DASHBOARD API (read-only status endpoints for the React monitoring UI)
+# These do not participate in the FL protocol; they only read existing
+# Redis state (plus the small "fl:aggregating" / "fl:round:current_selected"
+# markers set alongside the coordinator loop above) to report live status.
+# ----------------------------------------------------
+
+_s3_health_cache = {"ok": None, "ts": 0.0}
+
+def check_s3_health() -> bool:
+    from s3_helper import S3_MOCK, MOCK_S3_DIR
+    if S3_MOCK:
+        os.makedirs(MOCK_S3_DIR, exist_ok=True)
+        return True
+    now = time.time()
+    if _s3_health_cache["ok"] is not None and (now - _s3_health_cache["ts"]) < 5:
+        return _s3_health_cache["ok"]
+    try:
+        s3_client.head_bucket(Bucket=get_bucket_name())
+        _s3_health_cache.update(ok=True, ts=now)
+    except Exception:
+        _s3_health_cache.update(ok=False, ts=now)
+    return _s3_health_cache["ok"]
+
+@app.get("/api/status")
+async def api_status():
+    from s3_helper import S3_MOCK
+    try:
+        redis_ok = bool(await redis_async.ping())
+    except Exception:
+        redis_ok = False
+
+    active_clients = list(await redis_async.smembers("fl:active_clients"))
+    is_running = (await redis_async.get("fl:is_running")) == "true"
+    current_round = int(await redis_async.get("fl:current_round") or "0")
+    rounds_left = int(await redis_async.get("fl:rounds_left") or str(ROUNDS))
+    aggregating = (await redis_async.get("fl:aggregating")) == "true"
+
+    return {
+        "redis_connected": redis_ok,
+        "s3_connected": check_s3_health(),
+        "s3_mode": "mock" if S3_MOCK else "aws",
+        "s3_bucket": get_bucket_name(),
+        "fl_running": is_running,
+        "current_round": current_round,
+        "rounds_left": rounds_left,
+        "total_rounds": ROUNDS,
+        "n_required": N,
+        "k_selected": K,
+        "aggregator": os.environ.get("FL_AGGREGATOR", "fedavg"),
+        "selector": os.environ.get("FL_SELECTOR", "rl"),
+        "connected_clients": len(active_clients),
+        "aggregating": aggregating,
+    }
+
+@app.get("/api/clients")
+async def api_clients():
+    active_clients = list(await redis_async.smembers("fl:active_clients"))
+    current_round = int(await redis_async.get("fl:current_round") or "0")
+
+    selected_raw = await redis_async.get("fl:round:current_selected")
+    selected_ids = set(json.loads(selected_raw)) if selected_raw else set()
+
+    uploads_raw = await redis_async.lrange(f"fl:round:{current_round}:uploads", 0, -1)
+    uploaded_ids = {json.loads(u)["client_id"] for u in uploads_raw}
+
+    evals_raw = await redis_async.lrange(f"fl:round:{current_round}:evals", 0, -1)
+    evaluated_ids = {json.loads(ev)["client_id"] for ev in evals_raw}
+
+    client_id_map_raw = await redis_async.hgetall("fl:client_id_map")
+    profiles_raw = await redis_async.hgetall("fl:client_profiles")
+
+    clients = []
+    for cid in sorted(active_clients):
+        num_id = client_id_map_raw.get(cid)
+        profile = json.loads(profiles_raw[num_id]) if num_id and num_id in profiles_raw else {}
+        clients.append({
+            "client_id": cid,
+            "numeric_id": int(num_id) if num_id is not None else None,
+            "selected": cid in selected_ids,
+            "uploaded": cid in uploaded_ids,
+            "evaluated": cid in evaluated_ids,
+            "cpu_frequency": profile.get("cpu_frequency"),
+            "tx_power": profile.get("tx_power"),
+        })
+    return {"clients": clients}
+
+@app.get("/api/metrics/history")
+async def api_metrics_history():
+    raw = await redis_async.get("fl:round_history")
+    history = json.loads(raw) if raw else []
+    return {"history": history}
+
+PLOT_FILES = {
+    "loss_vs_round.png",
+    "accuracy_vs_round.png",
+    "f1_vs_round.png",
+    "system_resources_vs_round.png",
+    "confusion_matrix_latest.png",
+}
+
+@app.get("/plots/{filename}")
+async def get_plot(filename: str):
+    if filename not in PLOT_FILES:
+        return JSONResponse(status_code=404, content={"error": "not found"})
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
+    if not os.path.exists(path):
+        return JSONResponse(status_code=404, content={"error": "not generated yet"})
+    return FileResponse(path, headers={"Cache-Control": "no-store"})
+
+# ----------------------------------------------------
+# Serve the built React dashboard as the root page ("/").
+# Build it with `cd dashboard && npm install && npm run build`
+# (outputs into server/static/). If that hasn't been built yet,
+# these routes are simply not registered and the API above still works.
+# ----------------------------------------------------
+_dashboard_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+if os.path.isdir(_dashboard_dir):
+    app.mount(
+        "/assets",
+        StaticFiles(directory=os.path.join(_dashboard_dir, "assets")),
+        name="dashboard-assets",
+    )
+
+    @app.get("/")
+    async def dashboard_root():
+        return FileResponse(os.path.join(_dashboard_dir, "index.html"))
 
 
 if __name__ == "__main__":

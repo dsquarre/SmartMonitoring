@@ -18,3 +18,7 @@ certs/
 fl.yaml
 *.zip
 results/
+.venv/
+dashboard/node_modules
+datasets/
+run/
