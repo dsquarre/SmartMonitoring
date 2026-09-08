@@ -345,6 +345,7 @@ def run_simulation(args):
                     if total_to_train < 20:
                         print(f" Client {cid} [{p['tier']}]: Trained (Weights) | Loss: {local_loss:.4f} | Accuracy: {eval_res.get('accuracy', 0.0):.4f} | Latency: {comp_lat:.2f}s | Energy: {measured_energy:.2f}J")
 
+                client_model.close()
                 del client_model
 
             # Clean memory after processing chunk
@@ -418,19 +419,27 @@ def run_simulation(args):
             else:
                 aggregator.aggregate(client_data, global_model_path, current_round=r)
 
+        # Clean temporary local weight files created during training
+        for item in client_data:
+            if aggregator.mode == "weights" and len(item) > 0 and isinstance(item[0], str) and os.path.exists(item[0]):
+                try:
+                    os.remove(item[0])
+                except Exception:
+                    pass
+
         tf.keras.backend.clear_session()
         gc.collect()
         elapsed_round = time.time() - start_round_time
 
-        # Evaluation Phase across all selected (or available) clients
+        # Evaluation Phase across ALL clients in the federation
         is_auprc_round = (r == 1 or r % 10 == 0)
-        print(f"[Evaluation] Evaluating updated global model on selected clients (Threshold 0.3 | AUPRC Round: {is_auprc_round})...")
+        print(f"[Evaluation] Evaluating updated global model on all {len(client_ids)} clients (Threshold 0.3 | AUPRC Round: {is_auprc_round})...")
         eval_results = []
         all_y_true = []
         all_y_score = []
 
-        for idx_start in range(0, len(selected_ids), args.batch_clients):
-            chunk_cids = selected_ids[idx_start:idx_start + args.batch_clients]
+        for idx_start in range(0, len(client_ids), args.batch_clients):
+            chunk_cids = client_ids[idx_start:idx_start + args.batch_clients]
 
             for cid in chunk_cids:
                 cm = ClientModel(client_files[cid], batch_size=args.batch_size)
@@ -449,6 +458,7 @@ def run_simulation(args):
                     "samples": client_samples[cid],
                     "metrics": e_res
                 })
+                cm.close()
                 del cm
 
             tf.keras.backend.clear_session()

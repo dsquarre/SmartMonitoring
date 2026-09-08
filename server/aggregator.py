@@ -4,6 +4,8 @@ import numpy as np
 from model import Model
 import copy
 import math
+import tensorflow as tf
+import gc
 
 def filter_poisoned_clients(client_data: List, global_model_path: str, mode: str = "weights", threshold_multiplier: float = 3.0) -> List:
     """
@@ -19,10 +21,10 @@ def filter_poisoned_clients(client_data: List, global_model_path: str, mode: str
         global_model = Model()
         global_model.model.load_weights(global_model_path)
         global_weights = global_model.model.get_weights()
+        local_model = Model()
         
         for item in client_data:
             model_path = item[0]
-            local_model = Model()
             local_model.model.load_weights(model_path)
             local_weights = local_model.model.get_weights()
             
@@ -30,6 +32,10 @@ def filter_poisoned_clients(client_data: List, global_model_path: str, mode: str
             flat_diff = np.concatenate([d.flatten() for d in diffs])
             norms.append(float(np.linalg.norm(flat_diff)))
             
+        del global_model, local_model
+        tf.keras.backend.clear_session()
+        gc.collect()
+
     elif mode == "gradients":
         for item in client_data:
             client_grads = item[0]
@@ -90,11 +96,11 @@ class FedAvg(ModelAggregator):
         print("Using FedAvg")
         client_data = filter_poisoned_clients(client_data, global_model_path, mode="weights")
         global_model = Model()
+        local_model = Model()
         total_samples = sum(samples for _, samples, *_, _ in client_data)
 
         aggregated_weights = None
         for model_path, client_samples, *_, _ in client_data:
-            local_model = Model()
             local_model.model.load_weights(model_path)
             local_weights = local_model.model.get_weights()
 
@@ -106,6 +112,9 @@ class FedAvg(ModelAggregator):
 
         global_model.model.set_weights(aggregated_weights)
         global_model.model.save(global_model_path)
+        del global_model, local_model
+        tf.keras.backend.clear_session()
+        gc.collect()
 
 class qFedAvg(ModelAggregator):
 
@@ -118,6 +127,7 @@ class qFedAvg(ModelAggregator):
     def aggregate(self, client_data, global_model_path, current_round):
         client_data = filter_poisoned_clients(client_data, global_model_path, mode="weights")
         global_model = Model()
+        local_model = Model()
         raw_weights = []
 
         for item in client_data:
@@ -131,7 +141,6 @@ class qFedAvg(ModelAggregator):
         for idx, item in enumerate(client_data):
             model_path, samples, loss, client_id = item[0], item[1], item[2], item[3]
             client_weight = (raw_weights[idx] / total_weight)
-            local_model = Model()
             local_model.model.load_weights(model_path)
             local_weights = (local_model.model.get_weights())
             if aggregated_weights is None:
@@ -140,6 +149,9 @@ class qFedAvg(ModelAggregator):
                 aggregated_weights[i] += (local_weights[i]*client_weight)
         global_model.model.set_weights(aggregated_weights)
         global_model.model.save(global_model_path)
+        del global_model, local_model
+        tf.keras.backend.clear_session()
+        gc.collect()
 
 class FedFV(ModelAggregator):
     def __init__(self, num_clients=10, alpha=0.1, tau=1):
@@ -265,6 +277,10 @@ class FedFV(ModelAggregator):
         if gt_norm > 0:
             gt = self.grad_scale(gt, gnorm / gt_norm)
 
+        del global_model
+        tf.keras.backend.clear_session()
+        gc.collect()
+
         return gt
 
 class FedAdam(ModelAggregator):
@@ -293,12 +309,15 @@ class FedAdam(ModelAggregator):
         global_weights = global_model.model.get_weights()
         total_samples = sum(samples for _, samples, *_, _ in client_data)
         if total_samples == 0:
+            del global_model
+            tf.keras.backend.clear_session()
+            gc.collect()
             return
 
         aggregated_gradient = [np.zeros_like(layer) for layer in global_weights]
+        local_model = Model()
 
         for (model_path, samples, loss, client_id, *_, _) in client_data:
-            local_model = Model()
             local_model.model.load_weights(model_path)
             local_weights = local_model.model.get_weights()
             client_weight = samples / total_samples
@@ -324,6 +343,9 @@ class FedAdam(ModelAggregator):
 
         global_model.model.set_weights(new_weights)
         global_model.model.save(global_model_path)
+        del global_model, local_model
+        tf.keras.backend.clear_session()
+        gc.collect()
 
 class FedProx(ModelAggregator):
     """
@@ -345,11 +367,14 @@ class FedProx(ModelAggregator):
         total_samples = sum(samples for _, samples, *_, _ in client_data)
 
         if total_samples == 0 or len(client_data) == 0:
+            del global_model
+            tf.keras.backend.clear_session()
+            gc.collect()
             return
 
         aggregated_weights = [np.zeros_like(layer) for layer in global_weights]
+        local_model = Model()
         for model_path, client_samples, *_, _ in client_data:
-            local_model = Model()
             local_model.model.load_weights(model_path)
             local_weights = local_model.model.get_weights()
             
@@ -363,6 +388,9 @@ class FedProx(ModelAggregator):
                 
         global_model.model.set_weights(aggregated_weights)
         global_model.model.save(global_model_path)
+        del global_model, local_model
+        tf.keras.backend.clear_session()
+        gc.collect()
 
 class Krum(ModelAggregator):
     """
@@ -385,8 +413,8 @@ class Krum(ModelAggregator):
         
         flat_client_weights = []
         all_local_weights = []
+        local_model = Model()
         for model_path, *_, _ in client_data:
-            local_model = Model()
             local_model.model.load_weights(model_path)
             l_weights = local_model.model.get_weights()
             all_local_weights.append(l_weights)
@@ -413,6 +441,9 @@ class Krum(ModelAggregator):
         global_model = Model()
         global_model.model.set_weights(selected_weights)
         global_model.model.save(global_model_path)
+        del global_model, local_model
+        tf.keras.backend.clear_session()
+        gc.collect()
 
 class SCAFFOLD(ModelAggregator):
     """
@@ -439,15 +470,18 @@ class SCAFFOLD(ModelAggregator):
 
         n = len(client_data)
         if n == 0:
+            del global_model
+            tf.keras.backend.clear_session()
+            gc.collect()
             return
 
         total_samples = sum(samples for _, samples, *_, _ in client_data)
         aggregated_weights = [np.zeros_like(layer) for layer in global_weights]
         delta_c_sum = [np.zeros_like(layer) for layer in global_weights]
+        local_model = Model()
 
         for item in client_data:
             model_path, samples, loss, cid = item[0], item[1], item[2], item[3]
-            local_model = Model()
             local_model.model.load_weights(model_path)
             local_weights = local_model.model.get_weights()
 
@@ -472,6 +506,9 @@ class SCAFFOLD(ModelAggregator):
 
         global_model.model.set_weights(aggregated_weights)
         global_model.model.save(global_model_path)
+        del global_model, local_model
+        tf.keras.backend.clear_session()
+        gc.collect()
 
 def get_aggregator_by_name(name: str, **kwargs) -> ModelAggregator:
     """

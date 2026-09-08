@@ -193,7 +193,9 @@ class Model:
 
         y_true = np.array(self.y_test[:self.num_test_samples], dtype=int)
 
-        eval_res = self.model.evaluate(test_ds, steps=steps, verbose=0, return_dict=True)
+        eps = 1e-7
+        preds_clipped = np.clip(preds_flat, eps, 1.0 - eps)
+        loss_val = float(-np.mean(y_true * np.log(preds_clipped) + (1.0 - y_true) * np.log(1.0 - preds_clipped)))
 
         unique_labels = np.unique(y_true)
         if len(unique_labels) > 1:
@@ -212,7 +214,7 @@ class Model:
         fn_val = int(np.sum((y_true == 1) & (pred_binary == 0)))
 
         metrics_dict = {
-            "loss": float(eval_res.get("loss", 0.0)),
+            "loss": loss_val,
             "accuracy": f2_val,
             "precision": prec,
             "recall": rec,
@@ -228,6 +230,24 @@ class Model:
         if return_preds:
             return metrics_dict, y_true, preds_flat
         return metrics_dict
+
+    def close(self):
+        """Explicit memory cleanup for dataset files and model references."""
+        if hasattr(self, 'data') and self.data is not None:
+            try:
+                self.data.close()
+            except Exception:
+                pass
+            self.data = None
+        self.X_train = None
+        self.y_train = None
+        self.X_test = None
+        self.y_test = None
+        if hasattr(self, 'model'):
+            try:
+                del self.model
+            except AttributeError:
+                pass
 
     def get_weights(self):
         return self.model.get_weights()
