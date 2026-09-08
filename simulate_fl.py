@@ -14,10 +14,15 @@ import json
 import csv
 import time
 import shutil
+import functools
 import numpy as np
+
+# Override print to automatically flush stdout on every print statement
+print = functools.partial(print, flush=True)
 
 # Suppress verbose TensorFlow C++ logging
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+
 
 # Ensure server and client directories are in sys.path for direct imports
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -267,7 +272,10 @@ def run_simulation(args):
 
         # Select clients
         selected_ids = selector.select_clients(client_ids, args.select_k, context=context)
-        print(f"Selected Clients for Round {r}: {selected_ids}")
+        if len(selected_ids) >= 20:
+            print(f"Selected {len(selected_ids)} Clients for Round {r} (Full Pool: {len(client_ids)})")
+        else:
+            print(f"Selected Clients for Round {r}: {selected_ids}")
 
         # Check if hierarchical meta-controller selected a new aggregation strategy
         if hasattr(selector, "last_chosen_agg") and selector.last_chosen_agg:
@@ -276,9 +284,10 @@ def run_simulation(args):
             aggregator = get_aggregator_by_name(chosen_strat)
 
         client_data = []
+        total_to_train = len(selected_ids)
 
         # Local training (chunked/sequential execution for CPU safety)
-        for idx_start in range(0, len(selected_ids), args.batch_clients):
+        for idx_start in range(0, total_to_train, args.batch_clients):
             chunk_cids = selected_ids[idx_start:idx_start + args.batch_clients]
 
             for cid in chunk_cids:
@@ -302,7 +311,8 @@ def run_simulation(args):
                     n_samples = client_samples[cid]
                     client_losses[cid] = float(local_loss)
                     client_data.append((avg_grads, n_samples, local_loss, num_id, comp_lat, measured_energy))
-                    print(f" Client {cid} [{p['tier']}]: Trained (Gradients) | Loss: {local_loss:.4f} | Latency: {comp_lat:.2f}s | Energy: {measured_energy:.2f}J")
+                    if total_to_train < 20:
+                        print(f" Client {cid} [{p['tier']}]: Trained (Gradients) | Loss: {local_loss:.4f} | Latency: {comp_lat:.2f}s | Energy: {measured_energy:.2f}J")
 
                 else:
                     # Weight-based training (FedAvg, FedProx, FedAdam, Krum, SCAFFOLD, etc.)
@@ -321,12 +331,17 @@ def run_simulation(args):
                     n_samples = client_samples[cid]
 
                     client_data.append((local_weights_path, n_samples, local_loss, cid, comp_lat, measured_energy))
-                    print(f" Client {cid} [{p['tier']}]: Trained (Weights) | Loss: {local_loss:.4f} | Accuracy: {eval_res.get('accuracy', 0.0):.4f} | Latency: {comp_lat:.2f}s | Energy: {measured_energy:.2f}J")
+                    if total_to_train < 20:
+                        print(f" Client {cid} [{p['tier']}]: Trained (Weights) | Loss: {local_loss:.4f} | Accuracy: {eval_res.get('accuracy', 0.0):.4f} | Latency: {comp_lat:.2f}s | Energy: {measured_energy:.2f}J")
 
                 del client_model
 
             # Clean memory after processing chunk
             tf.keras.backend.clear_session()
+
+            if total_to_train >= 20 and (len(client_data) % 20 == 0 or len(client_data) == total_to_train):
+                print(f" [Round {r}/{args.rounds}] Local Training Progress: {len(client_data)}/{total_to_train} clients completed...")
+
 
         # Compute cosine gradient/weight update similarity grad_sim = cos(Delta_i, Delta_theta_t)
         client_grad_sims = {}
