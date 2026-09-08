@@ -5,7 +5,7 @@ from sklearn.utils.class_weight import compute_class_weight
 
 
 class Model:
-    def __init__(self, path, batch_size=32):
+    def __init__(self, path, batch_size=32, model=None):
         self.dataset_name = path
         self.batch_size = batch_size
 
@@ -32,7 +32,10 @@ class Model:
             self.pos_weight = 1.0
             self.neg_weight = 1.0
 
-        self.model = self.build_model()
+        if model is not None:
+            self.model = model
+        else:
+            self.model = self.build_model()
 
     def build_model(self):
         inputs = tf.keras.Input(shape=(1000, 12), name='ecg_input')
@@ -243,11 +246,7 @@ class Model:
         self.y_train = None
         self.X_test = None
         self.y_test = None
-        if hasattr(self, 'model'):
-            try:
-                del self.model
-            except AttributeError:
-                pass
+        self.model = None
 
     def get_weights(self):
         return self.model.get_weights()

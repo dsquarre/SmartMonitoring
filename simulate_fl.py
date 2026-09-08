@@ -252,16 +252,18 @@ def run_simulation(args):
     initial_server_model.model.save(global_model_path)
     print(f"[Research Runner] Initial global model saved to {global_model_path}")
 
-    # Initialize client metrics cache
+    # Reusable shared model instances to prevent memory leakage across 100s of rounds
+    shared_train_model = ServerModel().model
+    shared_eval_model = ServerModel().model
+
+    # Initialize client metrics cache directly from dataset files without Keras model overhead
     client_samples = {}
     client_losses = {}
     print("[Research Runner] Inspecting client data partitions...")
     for cid, path in client_files.items():
-        cm = ClientModel(path, batch_size=args.batch_size)
-        client_samples[cid] = cm.get_samples()
+        with np.load(path, mmap_mode='r') as d:
+            client_samples[cid] = len(d['X_train'])
         client_losses[cid] = 1.0
-        del cm
-    tf.keras.backend.clear_session()
 
     round_history = []
     rounds_left = args.rounds
@@ -308,7 +310,7 @@ def run_simulation(args):
                 p_draw = p.get("power_draw_w", 4.5)
 
                 npz_path = client_files[cid]
-                client_model = ClientModel(npz_path, batch_size=args.batch_size)
+                client_model = ClientModel(npz_path, batch_size=args.batch_size, model=shared_train_model)
                 client_model.model.load_weights(global_model_path)
 
                 if aggregator.mode == "gradients":
@@ -349,7 +351,6 @@ def run_simulation(args):
                 del client_model
 
             # Clean memory after processing chunk
-            tf.keras.backend.clear_session()
             gc.collect()
 
             if total_to_train >= 20 and (len(client_data) % 20 == 0 or len(client_data) == total_to_train):
@@ -359,9 +360,8 @@ def run_simulation(args):
         # Compute cosine gradient/weight update similarity grad_sim = cos(Delta_i, Delta_theta_t)
         client_grad_sims = {}
         try:
-            global_m = ServerModel()
-            global_m.model.load_weights(global_model_path)
-            g_weights = np.concatenate([v.numpy().flatten() for v in global_m.model.trainable_variables])
+            shared_eval_model.load_weights(global_model_path)
+            g_weights = np.concatenate([v.numpy().flatten() for v in shared_eval_model.trainable_variables])
             deltas_dict = {}
 
             for item in client_data:
@@ -372,8 +372,8 @@ def run_simulation(args):
                     deltas_dict[cid] = flat_d
                 else:
                     w_path, _, _, cid, _, _ = item
-                    global_m.model.load_weights(w_path)
-                    c_weights = np.concatenate([v.numpy().flatten() for v in global_m.model.trainable_variables])
+                    shared_eval_model.load_weights(w_path)
+                    c_weights = np.concatenate([v.numpy().flatten() for v in shared_eval_model.trainable_variables])
                     deltas_dict[cid] = c_weights - g_weights
 
             if deltas_dict:
@@ -386,8 +386,7 @@ def run_simulation(args):
                     else:
                         sim = 0.0
                     client_grad_sims[cid] = sim
-            del global_m
-            tf.keras.backend.clear_session()
+            del deltas_dict
             gc.collect()
         except Exception as e:
             print(f"[GradSim Warning] Could not calculate gradient similarities: {e}")
@@ -427,7 +426,6 @@ def run_simulation(args):
                 except Exception:
                     pass
 
-        tf.keras.backend.clear_session()
         gc.collect()
         elapsed_round = time.time() - start_round_time
 
@@ -442,7 +440,7 @@ def run_simulation(args):
             chunk_cids = client_ids[idx_start:idx_start + args.batch_clients]
 
             for cid in chunk_cids:
-                cm = ClientModel(client_files[cid], batch_size=args.batch_size)
+                cm = ClientModel(client_files[cid], batch_size=args.batch_size, model=shared_eval_model)
                 cm.model.load_weights(global_model_path)
                 
                 if is_auprc_round:
@@ -461,7 +459,6 @@ def run_simulation(args):
                 cm.close()
                 del cm
 
-            tf.keras.backend.clear_session()
             gc.collect()
 
 
@@ -520,6 +517,8 @@ def run_simulation(args):
                     print(f"[Periodic AUPRC] Round {r} Global AUPRC: {global_auprc:.4f}")
                 else:
                     global_auprc = 0.5
+                del all_y_true, all_y_score
+                gc.collect()
             elif len(round_history) > 0 and "auprc" in round_history[-1]:
                 global_auprc = round_history[-1]["auprc"]
 
