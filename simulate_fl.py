@@ -17,7 +17,9 @@ import shutil
 import functools
 import warnings
 import logging
+import gc
 import numpy as np
+
 
 # Override print to automatically flush stdout on every print statement
 print = functools.partial(print, flush=True)
@@ -347,6 +349,7 @@ def run_simulation(args):
 
             # Clean memory after processing chunk
             tf.keras.backend.clear_session()
+            gc.collect()
 
             if total_to_train >= 20 and (len(client_data) % 20 == 0 or len(client_data) == total_to_train):
                 print(f" [Round {r}/{args.rounds}] Local Training Progress: {len(client_data)}/{total_to_train} clients completed...")
@@ -368,11 +371,9 @@ def run_simulation(args):
                     deltas_dict[cid] = flat_d
                 else:
                     w_path, _, _, cid, _, _ = item
-                    cm = ClientModel(client_files[cid], batch_size=args.batch_size)
-                    cm.model.load_weights(w_path)
-                    c_weights = np.concatenate([v.numpy().flatten() for v in cm.model.trainable_variables])
+                    global_m.model.load_weights(w_path)
+                    c_weights = np.concatenate([v.numpy().flatten() for v in global_m.model.trainable_variables])
                     deltas_dict[cid] = c_weights - g_weights
-                    del cm
 
             if deltas_dict:
                 avg_delta = np.mean(list(deltas_dict.values()), axis=0)
@@ -386,6 +387,7 @@ def run_simulation(args):
                     client_grad_sims[cid] = sim
             del global_m
             tf.keras.backend.clear_session()
+            gc.collect()
         except Exception as e:
             print(f"[GradSim Warning] Could not calculate gradient similarities: {e}")
 
@@ -417,6 +419,7 @@ def run_simulation(args):
                 aggregator.aggregate(client_data, global_model_path, current_round=r)
 
         tf.keras.backend.clear_session()
+        gc.collect()
         elapsed_round = time.time() - start_round_time
 
         # Evaluation Phase across all selected (or available) clients
@@ -426,26 +429,31 @@ def run_simulation(args):
         all_y_true = []
         all_y_score = []
 
-        for cid in selected_ids:
-            cm = ClientModel(client_files[cid], batch_size=args.batch_size)
-            cm.model.load_weights(global_model_path)
-            
-            if is_auprc_round:
-                e_res, y_t, y_s = cm.evaluate(threshold=0.3, return_preds=True)
-                if len(y_t) > 0:
-                    all_y_true.append(y_t)
-                    all_y_score.append(y_s)
-            else:
-                e_res = cm.evaluate(threshold=0.3, return_preds=False)
+        for idx_start in range(0, len(selected_ids), args.batch_clients):
+            chunk_cids = selected_ids[idx_start:idx_start + args.batch_clients]
 
-            eval_results.append({
-                "client_id": cid,
-                "samples": client_samples[cid],
-                "metrics": e_res
-            })
-            del cm
+            for cid in chunk_cids:
+                cm = ClientModel(client_files[cid], batch_size=args.batch_size)
+                cm.model.load_weights(global_model_path)
+                
+                if is_auprc_round:
+                    e_res, y_t, y_s = cm.evaluate(threshold=0.3, return_preds=True)
+                    if len(y_t) > 0:
+                        all_y_true.append(y_t)
+                        all_y_score.append(y_s)
+                else:
+                    e_res = cm.evaluate(threshold=0.3, return_preds=False)
 
-        tf.keras.backend.clear_session()
+                eval_results.append({
+                    "client_id": cid,
+                    "samples": client_samples[cid],
+                    "metrics": e_res
+                })
+                del cm
+
+            tf.keras.backend.clear_session()
+            gc.collect()
+
 
         # Check Evaluation Response Threshold tau_eval = 0.5 * N
         tau_eval = 0.5 * args.num_clients
