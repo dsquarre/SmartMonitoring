@@ -108,7 +108,7 @@ class Model:
         )
         return dataset.prefetch(tf.data.AUTOTUNE)
 
-    def train(self, epochs=1, verbose=0):
+    def train(self, epochs=5, verbose=0):
         """Standard local training for FedAvg, FedProx, etc."""
         train_ds = self.get_dataset(self.X_train, self.y_train, shuffle=True)
         steps_per_epoch = max(1, int(np.ceil(self.num_train_samples / self.batch_size)))

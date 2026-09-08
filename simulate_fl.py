@@ -626,7 +626,7 @@ if __name__ == "__main__":
     parser.add_argument("-n", "--num-clients", type=int, default=10, help="Total clients N (default: 10)")
     parser.add_argument("-k", "--select-k", type=int, default=None, help="Clients selected per round K (default: dynamic max(5, 0.2*N))")
     parser.add_argument("-r", "--rounds", type=int, default=5, help="Total FL rounds (default: 5)")
-    parser.add_argument("-e", "--local-epochs", type=int, default=1, help="Local training epochs per round (default: 1)")
+    parser.add_argument("-e", "--local-epochs", type=int, default=5, help="Local training epochs per round (default: 5)")
     parser.add_argument("-b", "--batch-clients", type=int, default=1, help="Clients trained per sequential batch (default: 1)")
     parser.add_argument("--batch-size", type=int, default=32, help="DataLoader batch size (default: 32)")
     parser.add_argument("-a", "--aggregator", type=str, default="fedavg",

@@ -325,8 +325,9 @@ async def simulate(client):
                     await asyncio.to_thread(tracker.start)
                     start_time = time.perf_counter()
 
-                    # Train locally for 1 epoch
-                    await asyncio.to_thread(client.model.train, 1)
+                    # Train locally for 5 epochs (or as requested by server)
+                    local_epochs = data.get("epochs", 5)
+                    await asyncio.to_thread(client.model.train, local_epochs)
 
                     comp_latency = time.perf_counter() - start_time
                     await asyncio.to_thread(tracker.stop)
