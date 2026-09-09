@@ -136,6 +136,34 @@ def plot_metrics(round_history, output_dir):
         plt.savefig(os.path.join(output_dir, "confusion_matrix_latest.png"))
         plt.close()
 
+    # 5. Aggregation Strategy Selection Frequency Plot
+    strategies = [x.get("chosen_strategy", "fedavg") for x in round_history if x.get("chosen_strategy")]
+    if strategies:
+        from collections import Counter
+        strat_counts = Counter(strategies)
+        labels = list(strat_counts.keys())
+        counts = list(strat_counts.values())
+
+        plt.figure(figsize=(7, 4.5))
+        bars = plt.bar(labels, counts, color='mediumpurple', edgecolor='black', alpha=0.85)
+        plt.xlabel("Aggregation Strategy")
+        plt.ylabel("Number of Rounds Selected")
+        plt.title("Aggregation Strategy Selection Frequency across Rounds")
+        plt.grid(axis='y', linestyle='--', alpha=0.7)
+
+        # Annotate exact count on top of each bar
+        max_count = max(counts) if counts else 1
+        plt.ylim(0, max_count * 1.15)
+        for bar in bars:
+            height = bar.get_height()
+            plt.text(bar.get_x() + bar.get_width() / 2.0, height + 0.05 * max_count,
+                     f'{int(height)}',
+                     ha='center', va='bottom', fontsize=10, fontweight='bold')
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, "strategy_selection_freq.png"))
+        plt.close()
+
     print(f"[Research Runner] Metric plots saved to {output_dir}")
 
 
@@ -339,6 +367,7 @@ def run_simulation(args):
                     local_loss = eval_res.get("loss", 1.0)
                     client_losses[cid] = float(local_loss)
 
+                    os.makedirs(tmp_model_dir, exist_ok=True)
                     local_weights_path = os.path.join(tmp_model_dir, f"{cid}_weights.keras")
                     client_model.model.save(local_weights_path)
                     n_samples = client_samples[cid]
