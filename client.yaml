@@ -1,0 +1,77 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: SmartMonitoring Client Cluster (Launch Template + ASG)
+
+Parameters:
+  InstanceTypeClient:
+    Type: String
+    Default: t3.xlarge
+  AMIId:
+    Type: AWS::EC2::Image::Id
+    Default: ami-006f82a1d5a27da54
+  DesiredCapacity:
+    Type: Number
+    Default: 1
+    Description: Number of client host machines 
+  MaxSize:
+    Type: Number
+    Default: 11
+  MinSize:
+    Type: Number
+    Default: 0
+
+Resources:
+  ClientLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        InstanceType: !Ref InstanceTypeClient
+        ImageId: !Ref AMIId
+        SecurityGroupIds:
+          - !ImportValue FL-SecurityGroupId
+        BlockDeviceMappings:
+          - DeviceName: /dev/sda1
+            Ebs:
+              VolumeSize: 50
+              VolumeType: gp3
+              DeleteOnTermination: true
+        UserData: !Base64 
+          Fn::Sub:
+            - |
+              #!/bin/bash
+              apt update -y
+              apt install python3-pip python3-venv python3-dev git docker.io -y
+              systemctl enable docker
+              systemctl start docker
+              usermod -aG docker ubuntu
+
+              cd /home/ubuntu/
+              git clone https://github.com/dsquarre/SmartMonitoring.git SmartMonitoring
+              chown -R ubuntu:ubuntu SmartMonitoring
+              cd SmartMonitoring/client
+
+              python3 -m venv venv
+              venv/bin/pip install --upgrade pip
+              venv/bin/pip install -r requirements.txt
+
+              # Injects the imported Server Private IP directly into .env
+              cat <<EOF > .env
+              SERVER_HOST=${ServerIp}
+              SERVER_PORT=8000
+              EOF
+            - ServerIp: !ImportValue FL-ServerPrivateIp
+
+  ClientAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      MinSize: !Ref MinSize
+      MaxSize: !Ref MaxSize
+      DesiredCapacity: !Ref DesiredCapacity
+      LaunchTemplate:
+        LaunchTemplateId: !Ref ClientLaunchTemplate
+        Version: !GetAtt ClientLaunchTemplate.LatestVersionNumber
+      AvailabilityZones:
+        - !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: FL-ClientHost-Worker
+          PropagateAtLaunch: true

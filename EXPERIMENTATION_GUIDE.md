@@ -1,0 +1,242 @@
+# SmartMonitoring Experimentation Guide
+
+A concise reference for running Federated Learning experiments, customizing multi-objective rewards, persisting trained selectors, and generating 2D/3D Pareto trade-off plots with 30-seed paired hypothesis testing.
+
+---
+
+## 1. CLI Parameters Reference (`simulate_fl.py`)
+
+### General FL Controls
+| Parameter | Default | Description |
+| :--- | :--- | :--- |
+| `--data-dir` | `data/iid` | Path to client dataset folder |
+| `-n`, `--num-clients` | `10` | Total number of clients ($N$) |
+| `-k`, `--select-k` | `max(5, 0.2N)` | Selected clients per round ($K$). Omit for dynamic calculation. |
+| `-r`, `--rounds` | `5` | Total federated rounds ($R$) |
+| `-e`, `--local-epochs` | `1` | Local epochs per round |
+| `-b`, `--batch-clients` | `1` | Sequential client batch size (for low CPU memory consumption) |
+| `--seed` | `42` | Random seed for reproducibility across seeds |
+
+### Selector & Aggregator Selection
+| Parameter | Options / Default | Description |
+| :--- | :--- | :--- |
+| `-a`, `--aggregator` | `fedavg` (default), `qfedavg`, `fedfv`, `fedadam`, `fedprox`, `krum`, `scaffold` | Global aggregation algorithm |
+| `-s`, `--selector` | `random` (default), `linucb`, `wls-ts`, `dqn`, `hierarchical`, `oort`, `unconditioned` | Client selection algorithm (`unconditioned` removes cross-conditioning) |
+| `-g`, `--gamma` | `0.95` (default, range `(0, 1.0]`) | Exponential discount factor. Set `-g 1.0` for undiscounted RL. |
+| `--gamma-meta` | `None` (defaults to `--gamma`) | Level 1 Meta-Aggregator discount factor $\gamma_{\text{meta}}$ |
+| `--gamma-sub` | `None` (defaults to `--gamma`) | Level 2 Sub-controller discount factor $\gamma_{\text{sub}}$ |
+
+### Reward Weight Customization & Accuracy-Only Mode
+| Parameter | Default | Description |
+| :--- | :--- | :--- |
+| `--w-loss` | `1.0` | Sub-controller client loss reward weight |
+| `--w-acc` | `10.0` | Meta-controller accuracy improvement weight |
+| `--w-lat` | `1.0` | Latency penalty weight ($w_L$) |
+| `--w-eng` | `1.0` | Energy penalty weight ($w_E$) |
+| `--accuracy-only` | `False` | Disables latency and energy penalties (`w_lat=0.0`, `w_eng=0.0`) |
+
+### Hardware Profile Tiers & Profile Calculations
+Clients are deterministically assigned one of 4 standard hardware tiers at startup using the `--seed` parameter (`random.Random(seed)`):
+
+| Hardware Tier | CPU Frequency | Power Draw ($P_{\text{draw}}$) | Transmit Power ($P_{\text{tx}}$) | Network Rate ($r_{\text{trans}}$) |
+| :--- | :--- | :--- | :--- | :--- |
+| **Tier 1 (High-Performance)** | 2.5 GHz | 8.0 Watts | 0.5 Watts | 25 Mbps |
+| **Tier 2 (Mid-Range)** | 1.8 GHz | 4.5 Watts | 0.3 Watts | 15 Mbps |
+| **Tier 3 (Constrained)** | 1.2 GHz | 2.5 Watts | 0.15 Watts | 8 Mbps |
+| **Tier 4 (Low-Power IoT)** | 0.8 GHz | 1.2 Watts | 0.1 Watts | 3 Mbps |
+
+**Latency & Energy Formulas**:
+* $\text{Training Latency } t_{\text{comp}} = t_{\text{wall}} \times \left( \frac{2.0 \text{ GHz}}{f_{\text{client}}} \right)$
+* $\text{Training Energy } E_{\text{comp}} = t_{\text{comp}} \times P_{\text{draw}}$
+* $\text{Transmission Latency } t_{\text{trans}} = \frac{\text{Model Size (bits)}}{r_{\text{trans}}}$
+* $\text{Transmission Energy } E_{\text{trans}} = t_{\text{trans}} \times P_{\text{tx}}$
+
+> [!NOTE]
+> **Implementation Note on Client Selection Probability ($p_i$) Normalization in Early Rounds ($t < W$)**:
+> Client selection probability $p_i$ (Feature 7 of $X_t$) is normalized by actual accumulated selections made across available history, $k \cdot \min(t, W)$, where $t$ is current round and $W=10$ is the entropy trailing window. For early rounds $t < W$, this ensures correct scaling ($\sum_{i=1}^N p_i = 1.0$) from Round 1 onward without early scaling distortion.
+
+---
+
+
+## 2. Rounds Calibration Protocol ($T = 1.5 T_0$)
+
+Before running 30-seed hypothesis experiments, calibrate the optimal federated round budget $T$:
+1. **Run Full-Participation Baseline**: Execute FedAvg with $N=100$ clients and full participation $K=100$ across at least **200 rounds** (required for Non-IID datasets to ensure complete convergence and plateau detection):
+   ```bash
+   conda run -n web python simulate_fl.py --data-dir data/non_iid -n 100 -k 100 -r 200 -a fedavg -o results/to_calibration
+   ```
+2. **Execute $T_0$ Calibration Script**: Detect the plateau round $T_0$ (where the $F_2$ accuracy / loss curve stabilizes over 10+ consecutive rounds) and compute $T = \lceil 1.5 \times T_0 \rceil$:
+   ```bash
+   conda run -n web python calibrate_t0.py --metrics results/to_calibration/metrics.csv
+   ```
+3. **Set $T$ Environment Variable**: Use the calibrated $T$ (e.g., `T=150` if $T_0=100$, or `T=180` if $T_0=120$) in all subsequent 30-seed hypothesis runs.
+
+---
+
+## 3. 30-Seed Hypothesis Testing Workflows ($N=100$)
+
+The following bash commands run 30 distinct seeds (`42` to `71`) with $N=100$ clients and execute paired $t$-tests and Wilcoxon signed-rank tests for:
+1. **Max/Final $F_2$ Accuracy in Round $T$**
+2. **Total Energy across all rounds**
+3. **Total/Average Latency**
+4. **Round to reach 90% Target Accuracy**
+
+*Note: Set `$T` from your `calibrate_t0.py` output (e.g., `T=150`).*
+
+---
+
+### Hypothesis 1: Proposed Custom State ($G_t, X_t$) vs. Simple Oort-Style State
+
+```bash
+T=150  # Set from calibrate_t0.py (1.5 * T0)
+
+# 1. Run 30 Seeds for Proposed Custom State (Hierarchical RL)
+for seed in $(seq 42 71); do
+  conda run -n web python simulate_fl.py --data-dir data/iid -n 100 -r $T --seed $seed -s hierarchical -o results/h1_custom/s${seed}
+done
+
+# 2. Run 30 Seeds for Simple Oort-Style State (Oort RL)
+for seed in $(seq 42 71); do
+  conda run -n web python simulate_fl.py --data-dir data/iid -n 100 -r $T --seed $seed -s oort -o results/h1_oort/s${seed}
+done
+
+# 3. Paired Hypothesis Test & Pareto Comparison
+conda run -n web python compare_experiments.py \
+  --dirs "results/h1_custom/s*" "results/h1_oort/s*" \
+  --labels "Proposed Custom State" "Oort-Style State" \
+  -o results/hypothesis1_results
+```
+
+---
+
+### Hypothesis 2: Decoupled Discounted vs. Undiscounted LinUCB/TS
+
+```bash
+T=150  # Set from calibrate_t0.py
+
+# 1. Both Discounted (gamma_meta=0.95, gamma_sub=0.95)
+for seed in $(seq 42 71); do
+  conda run -n web python simulate_fl.py --data-dir data/iid -n 100 -r $T --seed $seed -s hierarchical --gamma-meta 0.95 --gamma-sub 0.95 -o results/h2_discount_both/s${seed}
+done
+
+# 2. Level 1 Meta-Controller Discounted Only (gamma_meta=0.95, gamma_sub=1.0)
+for seed in $(seq 42 71); do
+  conda run -n web python simulate_fl.py --data-dir data/iid -n 100 -r $T --seed $seed -s hierarchical --gamma-meta 0.95 --gamma-sub 1.0 -o results/h2_meta_only/s${seed}
+done
+
+# 3. Level 2 Sub-Controller Discounted Only (gamma_meta=1.0, gamma_sub=0.95)
+for seed in $(seq 42 71); do
+  conda run -n web python simulate_fl.py --data-dir data/iid -n 100 -r $T --seed $seed -s hierarchical --gamma-meta 1.0 --gamma-sub 0.95 -o results/h2_sub_only/s${seed}
+done
+
+# 4. Both Undiscounted (gamma_meta=1.0, gamma_sub=1.0)
+for seed in $(seq 42 71); do
+  conda run -n web python simulate_fl.py --data-dir data/iid -n 100 -r $T --seed $seed -s hierarchical --gamma-meta 1.0 --gamma-sub 1.0 -o results/h2_undiscounted_both/s${seed}
+done
+
+# 5. Paired Hypothesis Test & 4-Overlay Comparison
+conda run -n web python compare_experiments.py \
+  --dirs "results/h2_discount_both/s*" "results/h2_meta_only/s*" "results/h2_sub_only/s*" "results/h2_undiscounted_both/s*" \
+  --labels "Both Discounted (0.95)" "Meta Discounted Only" "Sub Discounted Only" "Both Undiscounted (1.0)" \
+  -o results/hypothesis2_results
+```
+
+---
+
+### Hypothesis 3: Aggregator Selection is Valuable and Converges (8-Way Comparison)
+
+```bash
+T=150  # Set from calibrate_t0.py
+
+# Step A: Pre-train and Save Selector over 30 Seeds
+for seed in $(seq 42 71); do
+  conda run -n web python simulate_fl.py --data-dir data/iid -n 100 -r $T --seed $seed -s linucb --save-selector results/h3_saved_selectors/selector_s${seed}.npz -o results/h3_train/s${seed}
+done
+
+# Step B: Run Frozen Selector with Meta-Aggregator & 7 Fixed Aggregators across 30 Seeds
+for seed in $(seq 42 71); do
+  # 1. Dynamic Meta-Aggregator + Frozen Selector
+  conda run -n web python simulate_fl.py --data-dir data/iid -n 100 -r $T --seed $seed -s hierarchical --load-selector results/h3_saved_selectors/selector_s${seed}.npz --freeze-selector -o results/h3_meta/s${seed}
+
+  # 2-8. Fixed Aggregators + Frozen Selector
+  for agg in fedavg fedprox scaffold krum fedadam fedfv qfedavg; do
+    conda run -n web python simulate_fl.py --data-dir data/iid -n 100 -r $T --seed $seed -s linucb -a $agg --load-selector results/h3_saved_selectors/selector_s${seed}.npz --freeze-selector -o results/h3_${agg}/s${seed}
+  done
+done
+
+# Step C: 8-Way Overlay & Pareto Hypothesis Comparison
+conda run -n web python compare_experiments.py \
+  --dirs "results/h3_meta/s*" "results/h3_fedavg/s*" "results/h3_fedprox/s*" "results/h3_scaffold/s*" "results/h3_krum/s*" "results/h3_fedadam/s*" "results/h3_fedfv/s*" "results/h3_qfedavg/s*" \
+  --labels "Meta-Aggregator" "FedAvg" "FedProx" "SCAFFOLD" "Krum" "FedAdam" "FedFV" "qFedAvg" \
+  -o results/hypothesis3_results
+```
+
+---
+
+### Hypothesis 4: Multi-Objective Pareto vs. Accuracy-Only Objective
+
+```bash
+T=150  # Set from calibrate_t0.py
+
+# 1. Run 30 Seeds for Multi-Objective Pareto (w_lat=1.0, w_eng=1.0)
+for seed in $(seq 42 71); do
+  conda run -n web python simulate_fl.py --data-dir data/iid -n 100 -r $T --seed $seed -s hierarchical --w-lat 1.0 --w-eng 1.0 -o results/h4_multiobj/s${seed}
+done
+
+# 2. Run 30 Seeds for Accuracy-Only Objective (w_lat=0.0, w_eng=0.0)
+for seed in $(seq 42 71); do
+  conda run -n web python simulate_fl.py --data-dir data/iid -n 100 -r $T --seed $seed -s hierarchical --accuracy-only -o results/h4_acconly/s${seed}
+done
+
+# 3. Paired Hypothesis Test & Pareto Comparison
+conda run -n web python compare_experiments.py \
+  --dirs "results/h4_multiobj/s*" "results/h4_acconly/s*" \
+  --labels "Multi-Objective Pareto" "Accuracy-Only Baseline" \
+  -o results/hypothesis4_results
+```
+
+---
+
+### Hypothesis 5: Aggregator Conditioning Ablation (Conditioned vs. Independent)
+
+Tests whether cross-conditioning Level 2 client selection ($X_t$) on the chosen aggregator and tracking previous aggregator actions in Level 1 ($G_t$) improves performance compared to running both controllers independently without cross-conditioning.
+
+```bash
+T=150  # Set from calibrate_t0.py
+
+# 1. Run 30 Seeds for Proposed Conditioned Hierarchical Selector (G_t 20d, X_t 14d)
+for seed in $(seq 42 71); do
+  conda run -n web python simulate_fl.py --data-dir data/iid -n 100 -r $T --seed $seed -s hierarchical -o results/h5_conditioned/s${seed}
+done
+
+# 2. Run 30 Seeds for Unconditioned / Independent Selector (G_t 12d, X_t 7d)
+for seed in $(seq 42 71); do
+  conda run -n web python simulate_fl.py --data-dir data/iid -n 100 -r $T --seed $seed -s unconditioned -o results/h5_unconditioned/s${seed}
+done
+
+# 3. Paired Hypothesis Test & Pareto Comparison
+conda run -n web python compare_experiments.py \
+  --dirs "results/h5_conditioned/s*" "results/h5_unconditioned/s*" \
+  --labels "Conditioned Hierarchical" "Unconditioned Independent" \
+  -o results/hypothesis5_results
+```
+
+---
+
+## 4. Generated Analysis Outputs (`compare_experiments.py`)
+
+Running `compare_experiments.py` populates the output folder with:
+- **`comparison_loss_overlay.png`**: Mean loss curves with shaded $\pm 1 \text{ stderr}$ confidence bands.
+- **`comparison_f2_accuracy_overlay.png`**: Mean $F_2$-Score accuracy curves.
+- **`comparison_pareto_accuracy_vs_energy.png`**: 2D Accuracy vs Energy Pareto chart (mean $\pm 95\%$ CI).
+- **`comparison_pareto_accuracy_vs_latency.png`**: 2D Accuracy vs Latency Pareto chart.
+- **`comparison_pareto_accuracy_vs_joint_cost.png`**: 2D Accuracy vs Energy-Delay Product (EDP) joint cost.
+- **`comparison_pareto_3d_accuracy_vs_energy_latency.png`**: 3D Tradeoff plot (Latency $\times$ Energy $\times$ Accuracy).
+- **`hypothesis_test_results.csv`**: Paired $t$-test statistic, $p$-value, and Wilcoxon signed-rank test results for:
+  1. Final Loss ($L_T$)
+  2. Final $F_2$ Score (Accuracy)
+  3. Total Energy
+  4. Total Latency
+  5. Round to 90% Target Accuracy
+- **`comparison_summary.csv`**: Aggregated final round metrics per strategy group.
+

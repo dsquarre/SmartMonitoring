@@ -1,0 +1,154 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: SmartMonitoring Core Stack (Server, S3, Base Network)
+
+Parameters:
+  InstanceTypeServer:
+    Type: String
+    Default: t3.xlarge
+  AMIId:
+    Type: AWS::EC2::Image::Id
+    Default: ami-006f82a1d5a27da54
+
+Resources:
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow SSH and Uvicorn API/WebSocket access
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          CidrIp: 0.0.0.0/0
+
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "fl-model-storage-${AWS::AccountId}-${AWS::Region}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders: ['*']
+            AllowedMethods: [GET, PUT, HEAD]
+            AllowedOrigins: ['*']
+            MaxAge: 3000
+
+  EC2S3AccessRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ec2.amazonaws.com]
+            Action: ['sts:AssumeRole']
+      Policies:
+        - PolicyName: S3FLBucketAccessPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ['s3:PutObject', 's3:GetObject', 's3:DeleteObject']
+                Resource: !Sub "${S3Bucket.Arn}/*"
+              - Effect: Allow
+                Action: ['s3:ListBucket']
+                Resource: !GetAtt S3Bucket.Arn
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles: [!Ref EC2S3AccessRole]
+
+  Server:
+    Type: AWS::EC2::Instance
+    Properties:
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      SecurityGroups: [!Ref SecurityGroup]
+      ImageId: !Ref AMIId
+      InstanceType: !Ref InstanceTypeServer
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 30
+            VolumeType: gp3
+            DeleteOnTermination: true
+      UserData: !Base64 |
+        #!/bin/bash
+        apt update -y
+        apt install python3-pip python3-venv python3-dev redis-server git -y
+        systemctl enable redis-server
+        systemctl start redis-server
+        cd /home/ubuntu/
+        git clone https://github.com/dsquarre/SmartMonitoring.git SmartMonitoring
+        chown -R ubuntu:ubuntu SmartMonitoring
+        cd SmartMonitoring/server
+        python3 -m venv venv
+        venv/bin/pip install --upgrade pip
+        venv/bin/pip install -r requirements.txt
+        cat <<EOF > .env
+        S3_MOCK=false
+        S3_BUCKET=fl-model-storage-${AWS::AccountId}-${AWS::Region}
+        AWS_REGION=${AWS::Region}
+        FL_N=10
+        FL_K=4
+        FL_ROUNDS=5
+        EOF
+
+        cat <<EOF > /etc/systemd/system/fl-celery.service
+        [Unit]
+        Description=Federated Learning Celery Worker Service
+        After=network.target redis-server.service
+
+        [Service]
+        User=ubuntu
+        WorkingDirectory=/home/ubuntu/SmartMonitoring/server
+        ExecStart=/home/ubuntu/SmartMonitoring/server/venv/bin/celery -A celery_app worker --loglevel=info
+        Restart=always
+        RestartSec=5
+
+        [Install]
+        WantedBy=multi-user.target
+        EOF
+
+        cat <<EOF > /etc/systemd/system/fl-server.service
+        [Unit]
+        Description=Federated Learning FastAPI Server Service
+        After=network.target redis-server.service fl-celery.service
+
+        [Service]
+        User=ubuntu
+        WorkingDirectory=/home/ubuntu/SmartMonitoring/server
+        ExecStart=/home/ubuntu/SmartMonitoring/server/venv/bin/python3 -m uvicorn main:app --host 0.0.0.0 --port 8000
+        Restart=always
+        RestartSec=5
+
+        [Install]
+        WantedBy=multi-user.target
+        EOF
+
+        systemctl daemon-reload
+        systemctl enable fl-celery fl-server
+        systemctl start fl-celery fl-server
+
+Outputs:
+  ServerPrivateIp:
+    Value: !GetAtt Server.PrivateIp
+    Export:
+      Name: FL-ServerPrivateIp
+  ServerPublicIp:
+    Value: !GetAtt Server.PublicIp
+    Export:
+      Name: FL-ServerPublicIp
+  SecurityGroupId:
+    Value: !Ref SecurityGroup
+    Export:
+      Name: FL-SecurityGroupId
