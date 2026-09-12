@@ -346,19 +346,6 @@ def run_simulation(args):
         print(f"\n--- Round {r}/{args.rounds} ---")
         start_round_time = time.time()
 
-        # Class weight warmup strategy over 15 rounds
-        warmup_rounds = 15
-        if r <= warmup_rounds:
-            alpha = (r - 1) / float(max(1, warmup_rounds - 1))
-            current_w_pos = 1.0 + alpha * (w_pos - 1.0)
-            current_w_neg = 1.0 + alpha * (w_neg - 1.0)
-        else:
-            current_w_pos = w_pos
-            current_w_neg = w_neg
-        current_train_class_weights = {0: current_w_neg, 1: current_w_pos}
-        if r <= warmup_rounds:
-            print(f"[Class Weight Warmup] Round {r}/{warmup_rounds} (Alpha: {alpha:.2f}) -> Training Class Weights: {{0: {current_w_neg:.4f}, 1: {current_w_pos:.4f}}}")
-
         context = {
             "round": r,
             "rounds_left": rounds_left,
@@ -423,7 +410,7 @@ def run_simulation(args):
                     batch_size=args.batch_size,
                     model=shared_train_model,
                     initial_bias=global_bias,
-                    class_weights=current_train_class_weights
+                    class_weights=global_class_weights
                 )
                 client_model.model.load_weights(global_model_path)
 
