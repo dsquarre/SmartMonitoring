@@ -90,15 +90,16 @@ def plot_metrics(round_history, output_dir):
     plt.savefig(os.path.join(output_dir, "loss_vs_round.png"))
     plt.close()
 
-    # 2. Accuracy (F2 Score) & F1 vs Round
+    # 2. Accuracy (F2 Score), Soft F2 & F1 vs Round
     plt.figure(figsize=(8, 5))
-    plt.plot(rounds, [x.get("f2", x.get("accuracy", 0.0)) for x in round_history], marker='o', color='royalblue', label='F2 Score (Primary Accuracy)')
+    plt.plot(rounds, [x.get("f2", x.get("accuracy", 0.0)) for x in round_history], marker='o', color='royalblue', label='Hard F2 (Thresh 0.3)')
+    plt.plot(rounds, [x.get("soft_f2", 0.0) for x in round_history], marker='x', linestyle='--', color='crimson', label='Soft F2 (Probabilistic)')
     plt.plot(rounds, [x.get("f1", 0.0) for x in round_history], marker='s', color='purple', label='F1 Score')
     plt.plot(rounds, [x.get("recall", 0.0) for x in round_history], marker='^', color='forestgreen', label='Recall')
     plt.plot(rounds, [x.get("precision", 0.0) for x in round_history], marker='d', color='darkorange', label='Precision')
     plt.xlabel("Federated Round")
     plt.ylabel("Score")
-    plt.title("Global F2, F1, Recall & Precision vs Federated Round")
+    plt.title("Global F2 (Hard & Soft), F1, Recall & Precision vs Federated Round")
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
