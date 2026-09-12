@@ -165,6 +165,21 @@ def plot_metrics(round_history, output_dir):
         plt.savefig(os.path.join(output_dir, "strategy_selection_freq.png"))
         plt.close()
 
+    # 6. Gradient & Weight Update L2 Norm vs Round
+    if round_history and any("global_grad_norm" in x for x in round_history):
+        plt.figure(figsize=(8, 5))
+        plt.plot(rounds, [x.get("global_grad_norm", 0.0) for x in round_history], marker='o', color='darkblue', label='Global Update Norm')
+        plt.plot(rounds, [x.get("mean_client_grad_norm", 0.0) for x in round_history], marker='s', linestyle='--', color='teal', label='Mean Client Update Norm')
+        plt.plot(rounds, [x.get("max_client_grad_norm", 0.0) for x in round_history], marker='^', linestyle=':', color='crimson', label='Max Client Update Norm')
+        plt.xlabel("Federated Round")
+        plt.ylabel("L2 Norm")
+        plt.title("Gradient & Weight Update L2 Norms vs Federated Round")
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, "grad_norm_vs_round.png"))
+        plt.close()
+
     print(f"[Research Runner] Metric plots saved to {output_dir}")
 
 
@@ -463,20 +478,27 @@ def run_simulation(args):
                     c_weights = np.concatenate([v.numpy().flatten() for v in shared_eval_model.trainable_variables])
                     deltas_dict[cid] = c_weights - g_weights
 
+            client_norms = []
             if deltas_dict:
                 avg_delta = np.mean(list(deltas_dict.values()), axis=0)
                 norm_avg = np.linalg.norm(avg_delta)
                 for cid, delta in deltas_dict.items():
-                    norm_d = np.linalg.norm(delta)
+                    norm_d = float(np.linalg.norm(delta))
+                    client_norms.append(norm_d)
                     if norm_d > 1e-8 and norm_avg > 1e-8:
                         sim = float(np.dot(delta, avg_delta) / (norm_d * norm_avg))
                     else:
                         sim = 0.0
                     client_grad_sims[cid] = sim
+            
+            mean_client_grad_norm = float(np.mean(client_norms)) if client_norms else 0.0
+            max_client_grad_norm = float(np.max(client_norms)) if client_norms else 0.0
+            min_client_grad_norm = float(np.min(client_norms)) if client_norms else 0.0
             del deltas_dict
             gc.collect()
         except Exception as e:
             print(f"[GradSim Warning] Could not calculate gradient similarities: {e}")
+            mean_client_grad_norm, max_client_grad_norm, min_client_grad_norm = 0.0, 0.0, 0.0
 
         # Check Training Response Threshold tau_train = 0.5 * K
         tau_train = 0.5 * args.select_k
@@ -485,6 +507,7 @@ def run_simulation(args):
         if n_responding_train < tau_train:
             print(f"[Training Dropout Warning] Responding training clients ({n_responding_train}) below threshold ({tau_train:.1f}). Skipping weight aggregation.")
             dropped_training = True
+            global_grad_norm = 0.0
         else:
             dropped_training = False
             # Aggregation Phase
@@ -505,6 +528,23 @@ def run_simulation(args):
             else:
                 aggregator.aggregate(client_data, global_model_path, current_round=r)
 
+            # Calculate Global Model Weight Update L2 Norm
+            try:
+                shared_eval_model.load_weights(global_model_path)
+                new_g_weights = np.concatenate([v.numpy().flatten() for v in shared_eval_model.trainable_variables])
+                global_grad_norm = float(np.linalg.norm(new_g_weights - g_weights))
+            except Exception:
+                global_grad_norm = 0.0
+
+        # Numerical safety guard for NaN / Inf values
+        if np.isnan(global_grad_norm) or np.isinf(global_grad_norm):
+            print(f"[Numerical Safety Warning] Round {r}: Global gradient norm is NaN/Inf ({global_grad_norm}). Sanitizing to 0.0.")
+            global_grad_norm = 0.0
+        if np.isnan(mean_client_grad_norm) or np.isinf(mean_client_grad_norm):
+            mean_client_grad_norm = 0.0
+        if np.isnan(max_client_grad_norm) or np.isinf(max_client_grad_norm):
+            max_client_grad_norm = 0.0
+
         # Clean temporary local weight files created during training
         for item in client_data:
             if aggregator.mode == "weights" and len(item) > 0 and isinstance(item[0], str) and os.path.exists(item[0]):
@@ -517,7 +557,7 @@ def run_simulation(args):
         elapsed_round = time.time() - start_round_time
 
         # Evaluation Phase across ALL clients in the federation
-        is_auprc_round = (r == 1 or r % 10 == 0)
+        is_auprc_round = True
         print(f"[Evaluation] Evaluating updated global model on all {len(client_ids)} clients (Threshold 0.3 | AUPRC Round: {is_auprc_round})...")
         eval_results = []
         all_y_true = []
@@ -658,6 +698,10 @@ def run_simulation(args):
             "auprc": global_auprc if global_auprc is not None else 0.0,
             "avg_comp_latency": float(np.mean(latencies)) if latencies else 0.0,
             "total_round_energy": float(np.sum(energies)) if energies else 0.0,
+            "global_grad_norm": global_grad_norm,
+            "mean_client_grad_norm": mean_client_grad_norm,
+            "max_client_grad_norm": max_client_grad_norm,
+            "min_client_grad_norm": min_client_grad_norm,
             "chosen_strategy": getattr(selector, "last_chosen_agg", args.aggregator),
             # Training-reward soft confusion constructs (not clinical/paper reporting metrics)
             "soft_tp": total_soft_tp,
@@ -671,7 +715,15 @@ def run_simulation(args):
 
         round_history.append(round_metrics)
 
-        print(f" Round {r} Results | Loss: {round_metrics['loss']:.4f} | F2 (Acc): {global_f2:.4f} | Soft-F2: {global_soft_f2:.4f} | F1: {global_f1:.4f} | Rec: {global_rec:.4f} | Prec: {global_prec:.4f} | Time: {elapsed_round:.2f}s")
+        print(f" Round {r} Results | Loss: {round_metrics['loss']:.4f} | GradNorm (Global/Mean/Max): {global_grad_norm:.4f}/{mean_client_grad_norm:.4f}/{max_client_grad_norm:.4f} | Hard-F2: {global_f2:.4f} | Soft-F2: {global_soft_f2:.4f} | Rec: {global_rec:.4f} | Prec: {global_prec:.4f} | Time: {elapsed_round:.2f}s")
+
+        # Early termination guard: If NaN / Inf is detected in loss, metrics, or gradient norms, terminate loop immediately
+        if (np.isnan(avg_loss) or np.isinf(avg_loss) or
+            np.isnan(global_grad_norm) or np.isinf(global_grad_norm) or
+            np.isnan(global_f2) or np.isnan(global_soft_f2)):
+            print(f"\n[CRITICAL NUMERICAL STABILITY ERROR] Round {r}: NaN/Inf detected (Loss={avg_loss}, GradNorm={global_grad_norm}). Terminating simulation loop immediately.")
+            plot_metrics(round_history, args.output_dir)
+            break
 
         # Update Client Selector Policy (RL / Contextual Bandits)
         prev_loss = round_history[-2]["loss"] if len(round_history) > 1 else round_metrics["loss"]
