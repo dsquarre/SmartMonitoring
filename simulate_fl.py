@@ -136,6 +136,34 @@ def plot_metrics(round_history, output_dir):
         plt.savefig(os.path.join(output_dir, "confusion_matrix_latest.png"))
         plt.close()
 
+    # 5. Aggregation Strategy Selection Frequency Plot
+    strategies = [x.get("chosen_strategy", "fedavg") for x in round_history if x.get("chosen_strategy")]
+    if strategies:
+        from collections import Counter
+        strat_counts = Counter(strategies)
+        labels = list(strat_counts.keys())
+        counts = list(strat_counts.values())
+
+        plt.figure(figsize=(7, 4.5))
+        bars = plt.bar(labels, counts, color='mediumpurple', edgecolor='black', alpha=0.85)
+        plt.xlabel("Aggregation Strategy")
+        plt.ylabel("Number of Rounds Selected")
+        plt.title("Aggregation Strategy Selection Frequency across Rounds")
+        plt.grid(axis='y', linestyle='--', alpha=0.7)
+
+        # Annotate exact count on top of each bar
+        max_count = max(counts) if counts else 1
+        plt.ylim(0, max_count * 1.15)
+        for bar in bars:
+            height = bar.get_height()
+            plt.text(bar.get_x() + bar.get_width() / 2.0, height + 0.05 * max_count,
+                     f'{int(height)}',
+                     ha='center', va='bottom', fontsize=10, fontweight='bold')
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, "strategy_selection_freq.png"))
+        plt.close()
+
     print(f"[Research Runner] Metric plots saved to {output_dir}")
 
 
@@ -306,8 +334,31 @@ def run_simulation(args):
             for cid in chunk_cids:
                 num_id = client_id_map[cid]
                 p = profiles.get(num_id, STANDARD_HARDWARE_PROFILES[0])
+                # Hardware profile parameters
                 f_client = p.get("cpu_frequency", 2.0e9)
                 p_draw = p.get("power_draw_w", 4.5)
+                tx_pwr = p.get("tx_power", 0.3)
+                r_trans = p.get("r_trans", 15e6)
+                n_samples = client_samples[cid]
+
+                # Model payload size (8 Mbit default, 16 Mbit for SCAFFOLD with control variates)
+                agg_name = getattr(aggregator, "name", str(aggregator)).lower()
+                payload_bits = 16.0e6 if "scaffold" in agg_name else 8.0e6
+
+                if getattr(args, "deterministic_cost", True):
+                    flops_per_sample = 2.5e6
+                    if aggregator.mode == "gradients":
+                        total_flops = n_samples * 1.0 * flops_per_sample
+                    else:
+                        total_flops = n_samples * args.local_epochs * flops_per_sample
+
+                    comp_lat = float(total_flops / f_client)
+                    trans_lat = float(payload_bits / r_trans)
+                    comp_lat = float(comp_lat + trans_lat)
+
+                    comp_energy = comp_lat * p_draw
+                    trans_energy = trans_lat * tx_pwr
+                    measured_energy = float(comp_energy + trans_energy)
 
                 npz_path = client_files[cid]
                 client_model = ClientModel(npz_path, batch_size=args.batch_size, model=shared_train_model)
@@ -318,10 +369,10 @@ def run_simulation(args):
                     t0 = time.time()
                     avg_grads, local_loss = client_model.train_local_gradients_fv()
                     t_wall = time.time() - t0
-                    comp_lat = float(t_wall * (f_ref / f_client))
-                    measured_energy = float(comp_lat * p_draw)
+                    if not getattr(args, "deterministic_cost", True):
+                        comp_lat = float(t_wall * (f_ref / f_client))
+                        measured_energy = float(comp_lat * p_draw)
 
-                    n_samples = client_samples[cid]
                     client_losses[cid] = float(local_loss)
                     client_data.append((avg_grads, n_samples, local_loss, num_id, comp_lat, measured_energy))
                     if total_to_train < 20:
@@ -332,16 +383,17 @@ def run_simulation(args):
                     t0 = time.time()
                     client_model.train(epochs=args.local_epochs, verbose=0)
                     t_wall = time.time() - t0
-                    comp_lat = float(t_wall * (f_ref / f_client))
-                    measured_energy = float(comp_lat * p_draw)
+                    if not getattr(args, "deterministic_cost", True):
+                        comp_lat = float(t_wall * (f_ref / f_client))
+                        measured_energy = float(comp_lat * p_draw)
 
                     eval_res = client_model.evaluate()
                     local_loss = eval_res.get("loss", 1.0)
                     client_losses[cid] = float(local_loss)
 
+                    os.makedirs(tmp_model_dir, exist_ok=True)
                     local_weights_path = os.path.join(tmp_model_dir, f"{cid}_weights.keras")
                     client_model.model.save(local_weights_path)
-                    n_samples = client_samples[cid]
 
                     client_data.append((local_weights_path, n_samples, local_loss, cid, comp_lat, measured_energy))
                     if total_to_train < 20:
@@ -480,13 +532,24 @@ def run_simulation(args):
                 global_raw_acc = prev.get("raw_accuracy", 0.0)
                 avg_loss = prev.get("loss", 1.0)
                 global_auprc = prev.get("auprc", 0.5)
+
+                # Soft confusion constructs quorum fallback
+                total_soft_tp = prev.get("soft_tp", 0.0)
+                total_soft_fp = prev.get("soft_fp", 0.0)
+                total_soft_tn = prev.get("soft_tn", 0.0)
+                total_soft_fn = prev.get("soft_fn", 0.0)
+                global_soft_prec = prev.get("soft_precision", 0.0)
+                global_soft_rec = prev.get("soft_recall", 0.0)
+                global_soft_f2 = prev.get("soft_f2", 0.0)
             else:
                 total_tp, total_fp, total_tn, total_fn = 0, 0, 0, 0
                 global_prec, global_rec, global_f1, global_f2, global_raw_acc = 0.0, 0.0, 0.0, 0.0, 0.0
                 avg_loss = 1.0
                 global_auprc = 0.5
+                total_soft_tp, total_soft_fp, total_soft_tn, total_soft_fn = 0.0, 0.0, 0.0, 0.0
+                global_soft_prec, global_soft_rec, global_soft_f2 = 0.0, 0.0, 0.0
         else:
-            # Global Micro-Aggregation of Confusion Matrix Counts across evaluating clients
+            # Global Micro-Aggregation of Hard Confusion Matrix Counts across evaluating clients
             total_tp = sum(int(ev["metrics"].get("tp", 0)) for ev in eval_results)
             total_fp = sum(int(ev["metrics"].get("fp", 0)) for ev in eval_results)
             total_tn = sum(int(ev["metrics"].get("tn", 0)) for ev in eval_results)
@@ -504,6 +567,18 @@ def run_simulation(args):
             total_eval_samples = total_tp + total_tn + total_fp + total_fn
             global_raw_acc = float((total_tp + total_tn) / (total_eval_samples + 1e-8)) if total_eval_samples > 0 else 0.0
             avg_loss = float(np.mean([ev["metrics"]["loss"] for ev in eval_results])) if eval_results else 1.0
+
+            # Global Micro-Aggregation of Soft (Probability-Weighted) Confusion Counts (Training Reward Construct Only)
+            total_soft_tp = float(sum(float(ev["metrics"].get("soft_tp", 0.0)) for ev in eval_results))
+            total_soft_fp = float(sum(float(ev["metrics"].get("soft_fp", 0.0)) for ev in eval_results))
+            total_soft_tn = float(sum(float(ev["metrics"].get("soft_tn", 0.0)) for ev in eval_results))
+            total_soft_fn = float(sum(float(ev["metrics"].get("soft_fn", 0.0)) for ev in eval_results))
+
+            eps = 1e-7
+            global_soft_prec = float(total_soft_tp / (total_soft_tp + total_soft_fp + eps))
+            global_soft_rec = float(total_soft_tp / (total_soft_tp + total_soft_fn + eps))
+            denom_soft_f2 = (4 * global_soft_prec + global_soft_rec)
+            global_soft_f2 = float((5 * global_soft_prec * global_soft_rec) / denom_soft_f2) if denom_soft_f2 > 0 else 0.0
 
             # Periodic Global AUPRC Computation (Every 10 Rounds & Round 1)
             global_auprc = None
@@ -529,7 +604,7 @@ def run_simulation(args):
             "seed": args.seed,
             "round": r,
             "loss": avg_loss,
-            "accuracy": global_f2,  # Primary accuracy metric defined as F2 score
+            "accuracy": global_f2,  # Primary clinical/paper reporting metric (Hard 0.3 threshold F2)
             "f2": global_f2,
             "f1": global_f1,
             "precision": global_prec,
@@ -542,19 +617,28 @@ def run_simulation(args):
             "auprc": global_auprc if global_auprc is not None else 0.0,
             "avg_comp_latency": float(np.mean(latencies)) if latencies else 0.0,
             "total_round_energy": float(np.sum(energies)) if energies else 0.0,
-            "chosen_strategy": getattr(selector, "last_chosen_agg", args.aggregator)
+            "chosen_strategy": getattr(selector, "last_chosen_agg", args.aggregator),
+            # Training-reward soft confusion constructs (not clinical/paper reporting metrics)
+            "soft_tp": total_soft_tp,
+            "soft_fp": total_soft_fp,
+            "soft_tn": total_soft_tn,
+            "soft_fn": total_soft_fn,
+            "soft_precision": global_soft_prec,
+            "soft_recall": global_soft_rec,
+            "soft_f2": global_soft_f2
         }
 
         round_history.append(round_metrics)
 
-        print(f" Round {r} Results | Loss: {round_metrics['loss']:.4f} | F2 (Acc): {global_f2:.4f} | F1: {global_f1:.4f} | Rec: {global_rec:.4f} | Prec: {global_prec:.4f} | Time: {elapsed_round:.2f}s")
+        print(f" Round {r} Results | Loss: {round_metrics['loss']:.4f} | F2 (Acc): {global_f2:.4f} | Soft-F2: {global_soft_f2:.4f} | F1: {global_f1:.4f} | Rec: {global_rec:.4f} | Prec: {global_prec:.4f} | Time: {elapsed_round:.2f}s")
 
         # Update Client Selector Policy (RL / Contextual Bandits)
         prev_loss = round_history[-2]["loss"] if len(round_history) > 1 else round_metrics["loss"]
         global_loss_delta = prev_loss - round_metrics["loss"]
 
-        prev_acc = round_history[-2]["accuracy"] if len(round_history) > 1 else 0.0
-        global_acc_delta = round_metrics.get("accuracy", 0.0) - prev_acc
+        # RL Meta-Aggregator Reward uses continuous Soft-F2 delta to prevent hard-threshold recall collapse artifacts
+        prev_soft_f2 = round_history[-2].get("soft_f2", round_metrics.get("soft_f2", 0.0)) if len(round_history) > 1 else round_metrics.get("soft_f2", 0.0)
+        global_acc_delta = round_metrics.get("soft_f2", 0.0) - prev_soft_f2
 
         client_accuracies = {ev["client_id"]: float(ev["metrics"].get("accuracy", 0.0)) for ev in eval_results}
 

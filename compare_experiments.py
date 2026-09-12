@@ -486,6 +486,97 @@ def plot_joint_cost_pareto_frontier(group_data, output_dir):
     plt.close()
 
 
+def plot_strategy_selection_comparison(group_data, output_dir):
+    """
+    Plots comparative aggregation strategy selection frequency across groups and seeds.
+    Saves 'comparison_strategy_selection_frequency.png' and 'comparison_strategy_selection_distribution.csv'.
+    """
+    from collections import Counter
+
+    all_group_counts = {}
+    all_strategies = set()
+    distribution_rows = []
+
+    for label, data in group_data.items():
+        raw_runs = data.get("raw_runs", [])
+        num_runs = len(raw_runs)
+        if num_runs == 0:
+            continue
+
+        group_counts = Counter()
+        total_rounds = 0
+
+        for run in raw_runs:
+            for row in run:
+                strat = row.get("chosen_strategy", "fedavg")
+                if strat:
+                    group_counts[strat] += 1
+                    total_rounds += 1
+                    all_strategies.add(strat)
+
+        all_group_counts[label] = {
+            "counts": group_counts,
+            "num_runs": num_runs,
+            "total_rounds": total_rounds
+        }
+
+        for strat, count in group_counts.items():
+            avg_per_seed = float(count / num_runs) if num_runs > 0 else 0.0
+            pct = float(count / total_rounds * 100.0) if total_rounds > 0 else 0.0
+            distribution_rows.append({
+                "group": label,
+                "agg_strategy": strat,
+                "num_runs": num_runs,
+                "total_rounds_selected": count,
+                "avg_rounds_per_seed": round(avg_per_seed, 2),
+                "percentage_selected": round(pct, 2)
+            })
+
+    if not all_strategies or not all_group_counts:
+        return
+
+    dist_csv_path = os.path.join(output_dir, "comparison_strategy_selection_distribution.csv")
+    if distribution_rows:
+        fieldnames = ["group", "agg_strategy", "num_runs", "total_rounds_selected", "avg_rounds_per_seed", "percentage_selected"]
+        with open(dist_csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(distribution_rows)
+        print(f" Saved Strategy Selection Distribution CSV to: {dist_csv_path}")
+
+    # Plot Grouped Bar Chart
+    sorted_strats = sorted(list(all_strategies))
+    group_labels = list(all_group_counts.keys())
+    x = np.arange(len(sorted_strats))
+    width = 0.8 / max(1, len(group_labels))
+
+    colors = plt.cm.Set2(np.linspace(0, 1, max(3, len(group_labels))))
+
+    plt.figure(figsize=(10, 5.5))
+    for idx, (label, info) in enumerate(all_group_counts.items()):
+        counts = info["counts"]
+        num_runs = info["num_runs"]
+        avg_vals = [counts.get(st, 0) / max(1, num_runs) for st in sorted_strats]
+        offset = x + (idx - len(group_labels) / 2.0 + 0.5) * width
+        bars = plt.bar(offset, avg_vals, width, label=label, color=colors[idx], edgecolor='black', alpha=0.85)
+
+        for bar in bars:
+            h = bar.get_height()
+            if h > 0:
+                plt.text(bar.get_x() + bar.get_width() / 2.0, h + 0.3,
+                         f'{h:.1f}', ha='center', va='bottom', fontsize=8, fontweight='bold')
+
+    plt.xlabel("Aggregation Strategy", fontsize=11)
+    plt.ylabel("Mean Rounds Selected per Seed Run", fontsize=11)
+    plt.title("Comparative Aggregation Strategy Selection Distribution across Seeds", fontsize=12)
+    plt.xticks(x, [st.upper() for st in sorted_strats], fontsize=10)
+    plt.legend(title="Strategy / Hypothesis Group", loc="upper right")
+    plt.grid(axis='y', linestyle='--', alpha=0.7)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, "comparison_strategy_selection_frequency.png"), dpi=300)
+    plt.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Comparative Metrics & Paired Hypothesis Analysis")
     parser.add_argument("--dirs", nargs="+", required=True, help="Run directories or glob patterns")
@@ -519,6 +610,7 @@ def main():
     plot_pareto_frontier(group_data, args.output_dir)
     plot_3d_pareto_frontier(group_data, args.output_dir)
     plot_joint_cost_pareto_frontier(group_data, args.output_dir)
+    plot_strategy_selection_comparison(group_data, args.output_dir)
 
     # Paired Hypothesis Analysis if at least 2 groups exist
     labels = list(group_data.keys())
