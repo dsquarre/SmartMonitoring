@@ -3,9 +3,10 @@ import numpy as np
 
 class Model:
 
-    def __init__(self):
-        self.model = self.build_model()
-    def build_model(self):
+    def __init__(self, initial_bias=None):
+        self.model = self.build_model(initial_bias=initial_bias)
+
+    def build_model(self, initial_bias=None):
         inputs = tf.keras.Input(shape=(1000, 12), name='ecg_input')
 
         # Block 1
@@ -26,7 +27,15 @@ class Model:
         # Classification Head
         x = tf.keras.layers.Dense(128, activation='relu')(x)
         x = tf.keras.layers.Dropout(0.4)(x)
-        output = tf.keras.layers.Dense(1, activation='sigmoid', name='afib')(x)
+        
+        bias_val = initial_bias if initial_bias is not None else -2.2
+        bias_init = tf.keras.initializers.Constant(bias_val)
+        output = tf.keras.layers.Dense(
+            1,
+            activation='sigmoid',
+            bias_initializer=bias_init,
+            name='afib'
+        )(x)
 
         model = tf.keras.Model(inputs=inputs, outputs=output)
         model.compile(
