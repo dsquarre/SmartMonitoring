@@ -5,7 +5,7 @@ from sklearn.utils.class_weight import compute_class_weight
 
 
 class Model:
-    def __init__(self, path, batch_size=32, model=None):
+    def __init__(self, path, batch_size=32, model=None, initial_bias=None, class_weights=None):
         self.dataset_name = path
         self.batch_size = batch_size
 
@@ -19,25 +19,41 @@ class Model:
         self.num_train_samples = len(self.X_train)
         self.num_test_samples = len(self.X_test)
 
-        # Calculate local class balancing weights
-        train_labels = np.array(self.y_train, dtype=np.int32)
-        unique_classes = np.unique(train_labels)
-        if len(unique_classes) > 1:
-            weights = compute_class_weight('balanced', classes=unique_classes, y=train_labels)
-            self.class_weights = {int(c): float(w) for c, w in zip(unique_classes, weights)}
-            self.pos_weight = float(weights[1])
-            self.neg_weight = float(weights[0])
+        # Set or calculate class balancing weights
+        if class_weights is not None:
+            self.class_weights = {int(k): float(v) for k, v in class_weights.items()}
+            self.pos_weight = float(self.class_weights.get(1, 1.0))
+            self.neg_weight = float(self.class_weights.get(0, 1.0))
         else:
-            self.class_weights = {0: 1.0, 1: 1.0}
-            self.pos_weight = 1.0
-            self.neg_weight = 1.0
+            train_labels = np.array(self.y_train, dtype=np.int32)
+            unique_classes = np.unique(train_labels)
+            if len(unique_classes) > 1:
+                weights = compute_class_weight('balanced', classes=unique_classes, y=train_labels)
+                self.class_weights = {int(c): float(w) for c, w in zip(unique_classes, weights)}
+                self.pos_weight = float(weights[1])
+                self.neg_weight = float(weights[0])
+            else:
+                self.class_weights = {0: 1.0, 1: 1.0}
+                self.pos_weight = 1.0
+                self.neg_weight = 1.0
 
         if model is not None:
             self.model = model
         else:
-            self.model = self.build_model()
+            self.model = self.build_model(initial_bias=initial_bias)
 
-    def build_model(self):
+    def get_class_counts(self):
+        """Returns local train partition total and positive sample counts for Round 0 handshake."""
+        train_labels = np.array(self.y_train, dtype=np.int32)
+        pos_count = int(np.sum(train_labels == 1))
+        neg_count = int(np.sum(train_labels == 0))
+        return {
+            "total": len(train_labels),
+            "pos": pos_count,
+            "neg": neg_count
+        }
+
+    def build_model(self, initial_bias=None):
         inputs = tf.keras.Input(shape=(1000, 12), name='ecg_input')
 
         # Block 1
@@ -58,7 +74,16 @@ class Model:
         # Classification Head
         x = tf.keras.layers.Dense(128, activation='relu')(x)
         x = tf.keras.layers.Dropout(0.4)(x)
-        output = tf.keras.layers.Dense(1, activation='sigmoid', name='afib')(x)
+        
+        # Classification Output Layer with dynamic or default prior bias
+        bias_val = initial_bias if initial_bias is not None else -2.2
+        bias_init = tf.keras.initializers.Constant(bias_val)
+        output = tf.keras.layers.Dense(
+            1,
+            activation='sigmoid',
+            bias_initializer=bias_init,
+            name='afib'
+        )(x)
 
         model = tf.keras.Model(inputs=inputs, outputs=output)
         model.compile(

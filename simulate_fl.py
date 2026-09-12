@@ -275,15 +275,43 @@ def run_simulation(args):
             selector.freeze()
             print(f"[Selector CLI] Selector policy frozen! No weight updates will occur during simulation.")
 
-    # 4. Initialize Global Model
-    global_model_path = os.path.join(tmp_model_dir, "global_model.keras")
-    initial_server_model = ServerModel()
-    initial_server_model.model.save(global_model_path)
-    print(f"[Research Runner] Initial global model saved to {global_model_path}")
+    # 4. Round 0 Handshake: Metadata Aggregation for Global Bias & Global Class Weights
+    print(f"\n--- Round 0/{args.rounds} (Global Handshake & Metadata Aggregation) ---")
+    total_global_samples = 0
+    total_global_pos = 0
 
-    # Reusable shared model instances to prevent memory leakage across 100s of rounds
-    shared_train_model = ServerModel().model
-    shared_eval_model = ServerModel().model
+    for cid, path in client_files.items():
+        cm = ClientModel(path, batch_size=args.batch_size)
+        counts = cm.get_class_counts()
+        total_global_samples += counts["total"]
+        total_global_pos += counts["pos"]
+        cm.close()
+        del cm
+    gc.collect()
+
+    total_global_neg = max(1, total_global_samples - total_global_pos)
+    p_global = total_global_pos / max(1, total_global_samples)
+    p_global_clipped = float(np.clip(p_global, 1e-5, 1.0 - 1e-5))
+    global_bias = float(np.log(p_global_clipped / (1.0 - p_global_clipped)))
+
+    # Compute Global Class Weights (used across all client local training rounds)
+    w_pos = float(total_global_samples / (2.0 * max(1, total_global_pos)))
+    w_neg = float(total_global_samples / (2.0 * max(1, total_global_neg)))
+    global_class_weights = {0: w_neg, 1: w_pos}
+
+    print(f"[Round 0] Total Global Samples: {total_global_samples} (Pos: {total_global_pos} [{p_global*100:.2f}%], Neg: {total_global_neg} [{(1-p_global)*100:.2f}%])")
+    print(f"[Round 0] Computed Global Output Bias: {global_bias:.4f}")
+    print(f"[Round 0] Computed Global Class Weights: {{0: {w_neg:.4f}, 1: {w_pos:.4f}}}")
+
+    # Initialize Global Model with Round 0 Global Bias
+    global_model_path = os.path.join(tmp_model_dir, "global_model.keras")
+    initial_server_model = ServerModel(initial_bias=global_bias)
+    initial_server_model.model.save(global_model_path)
+    print(f"[Research Runner] Initial global model (Bias={global_bias:.4f}) saved to {global_model_path}")
+
+    # Reusable shared model instances initialized with global bias
+    shared_train_model = ServerModel(initial_bias=global_bias).model
+    shared_eval_model = ServerModel(initial_bias=global_bias).model
 
     # Initialize client metrics cache directly from dataset files without Keras model overhead
     client_samples = {}
@@ -362,7 +390,13 @@ def run_simulation(args):
                     measured_energy = float(comp_energy + trans_energy)
 
                 npz_path = client_files[cid]
-                client_model = ClientModel(npz_path, batch_size=args.batch_size, model=shared_train_model)
+                client_model = ClientModel(
+                    npz_path,
+                    batch_size=args.batch_size,
+                    model=shared_train_model,
+                    initial_bias=global_bias,
+                    class_weights=global_class_weights
+                )
                 client_model.model.load_weights(global_model_path)
 
                 if aggregator.mode == "gradients":
@@ -493,7 +527,13 @@ def run_simulation(args):
             chunk_cids = client_ids[idx_start:idx_start + args.batch_clients]
 
             for cid in chunk_cids:
-                cm = ClientModel(client_files[cid], batch_size=args.batch_size, model=shared_eval_model)
+                cm = ClientModel(
+                    client_files[cid],
+                    batch_size=args.batch_size,
+                    model=shared_eval_model,
+                    initial_bias=global_bias,
+                    class_weights=global_class_weights
+                )
                 cm.model.load_weights(global_model_path)
                 
                 if is_auprc_round:
