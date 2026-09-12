@@ -165,21 +165,6 @@ def plot_metrics(round_history, output_dir):
         plt.savefig(os.path.join(output_dir, "strategy_selection_freq.png"))
         plt.close()
 
-    # 6. Gradient & Weight Update L2 Norm vs Round
-    if round_history and any("global_grad_norm" in x for x in round_history):
-        plt.figure(figsize=(8, 5))
-        plt.plot(rounds, [x.get("global_grad_norm", 0.0) for x in round_history], marker='o', color='darkblue', label='Global Update Norm')
-        plt.plot(rounds, [x.get("mean_client_grad_norm", 0.0) for x in round_history], marker='s', linestyle='--', color='teal', label='Mean Client Update Norm')
-        plt.plot(rounds, [x.get("max_client_grad_norm", 0.0) for x in round_history], marker='^', linestyle=':', color='crimson', label='Max Client Update Norm')
-        plt.xlabel("Federated Round")
-        plt.ylabel("L2 Norm")
-        plt.title("Gradient & Weight Update L2 Norms vs Federated Round")
-        plt.legend()
-        plt.grid(True)
-        plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, "grad_norm_vs_round.png"))
-        plt.close()
-
     print(f"[Research Runner] Metric plots saved to {output_dir}")
 
 
