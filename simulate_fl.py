@@ -334,8 +334,31 @@ def run_simulation(args):
             for cid in chunk_cids:
                 num_id = client_id_map[cid]
                 p = profiles.get(num_id, STANDARD_HARDWARE_PROFILES[0])
+                # Hardware profile parameters
                 f_client = p.get("cpu_frequency", 2.0e9)
                 p_draw = p.get("power_draw_w", 4.5)
+                tx_pwr = p.get("tx_power", 0.3)
+                r_trans = p.get("r_trans", 15e6)
+                n_samples = client_samples[cid]
+
+                # Model payload size (8 Mbit default, 16 Mbit for SCAFFOLD with control variates)
+                agg_name = getattr(aggregator, "name", str(aggregator)).lower()
+                payload_bits = 16.0e6 if "scaffold" in agg_name else 8.0e6
+
+                if getattr(args, "deterministic_cost", True):
+                    flops_per_sample = 2.5e6
+                    if aggregator.mode == "gradients":
+                        total_flops = n_samples * 1.0 * flops_per_sample
+                    else:
+                        total_flops = n_samples * args.local_epochs * flops_per_sample
+
+                    comp_lat = float(total_flops / f_client)
+                    trans_lat = float(payload_bits / r_trans)
+                    comp_lat = float(comp_lat + trans_lat)
+
+                    comp_energy = comp_lat * p_draw
+                    trans_energy = trans_lat * tx_pwr
+                    measured_energy = float(comp_energy + trans_energy)
 
                 npz_path = client_files[cid]
                 client_model = ClientModel(npz_path, batch_size=args.batch_size, model=shared_train_model)
@@ -346,10 +369,10 @@ def run_simulation(args):
                     t0 = time.time()
                     avg_grads, local_loss = client_model.train_local_gradients_fv()
                     t_wall = time.time() - t0
-                    comp_lat = float(t_wall * (f_ref / f_client))
-                    measured_energy = float(comp_lat * p_draw)
+                    if not getattr(args, "deterministic_cost", True):
+                        comp_lat = float(t_wall * (f_ref / f_client))
+                        measured_energy = float(comp_lat * p_draw)
 
-                    n_samples = client_samples[cid]
                     client_losses[cid] = float(local_loss)
                     client_data.append((avg_grads, n_samples, local_loss, num_id, comp_lat, measured_energy))
                     if total_to_train < 20:
@@ -360,8 +383,9 @@ def run_simulation(args):
                     t0 = time.time()
                     client_model.train(epochs=args.local_epochs, verbose=0)
                     t_wall = time.time() - t0
-                    comp_lat = float(t_wall * (f_ref / f_client))
-                    measured_energy = float(comp_lat * p_draw)
+                    if not getattr(args, "deterministic_cost", True):
+                        comp_lat = float(t_wall * (f_ref / f_client))
+                        measured_energy = float(comp_lat * p_draw)
 
                     eval_res = client_model.evaluate()
                     local_loss = eval_res.get("loss", 1.0)
@@ -370,7 +394,6 @@ def run_simulation(args):
                     os.makedirs(tmp_model_dir, exist_ok=True)
                     local_weights_path = os.path.join(tmp_model_dir, f"{cid}_weights.keras")
                     client_model.model.save(local_weights_path)
-                    n_samples = client_samples[cid]
 
                     client_data.append((local_weights_path, n_samples, local_loss, cid, comp_lat, measured_energy))
                     if total_to_train < 20:
