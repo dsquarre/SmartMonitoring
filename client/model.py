@@ -180,7 +180,15 @@ class Model:
             "tp": 0,
             "fp": 0,
             "tn": 0,
-            "fn": 0
+            "fn": 0,
+            # Training-reward soft confusion constructs (not clinical/paper reporting metrics)
+            "soft_tp": 0.0,
+            "soft_fp": 0.0,
+            "soft_tn": 0.0,
+            "soft_fn": 0.0,
+            "soft_precision": 0.0,
+            "soft_recall": 0.0,
+            "soft_f2": 0.0
         }
         if self.num_test_samples == 0:
             if return_preds:
@@ -206,6 +214,7 @@ class Model:
         else:
             auc_val = 0.5
 
+        # Hard threshold 0.3 metrics (Primary clinical/paper reporting standard)
         prec = float(precision_score(y_true, pred_binary, zero_division=0))
         rec = float(recall_score(y_true, pred_binary, zero_division=0))
         denom_f2 = (4 * prec + rec)
@@ -215,6 +224,21 @@ class Model:
         tn_val = int(np.sum((y_true == 0) & (pred_binary == 0)))
         fp_val = int(np.sum((y_true == 0) & (pred_binary == 1)))
         fn_val = int(np.sum((y_true == 1) & (pred_binary == 0)))
+
+        # Soft (Probability-Weighted) Confusion Counts & Soft-F2 (Training Reward Construct Only)
+        pos_mask = (y_true == 1)
+        neg_mask = (y_true == 0)
+        soft_tp_val = float(np.sum(preds_clipped[pos_mask])) if np.any(pos_mask) else 0.0
+        soft_fn_val = float(np.sum(1.0 - preds_clipped[pos_mask])) if np.any(pos_mask) else 0.0
+        soft_fp_val = float(np.sum(preds_clipped[neg_mask])) if np.any(neg_mask) else 0.0
+        soft_tn_val = float(np.sum(1.0 - preds_clipped[neg_mask])) if np.any(neg_mask) else 0.0
+
+        denom_soft_prec = soft_tp_val + soft_fp_val + eps
+        denom_soft_rec = soft_tp_val + soft_fn_val + eps
+        soft_prec = float(soft_tp_val / denom_soft_prec)
+        soft_rec = float(soft_tp_val / denom_soft_rec)
+        denom_soft_f2 = (4 * soft_prec + soft_rec)
+        soft_f2_val = float((5 * soft_prec * soft_rec) / denom_soft_f2) if denom_soft_f2 > 0 else 0.0
 
         metrics_dict = {
             "loss": loss_val,
@@ -227,7 +251,15 @@ class Model:
             "tp": tp_val,
             "fp": fp_val,
             "tn": tn_val,
-            "fn": fn_val
+            "fn": fn_val,
+            # Training-reward soft confusion constructs (not clinical/paper reporting metrics)
+            "soft_tp": soft_tp_val,
+            "soft_fp": soft_fp_val,
+            "soft_tn": soft_tn_val,
+            "soft_fn": soft_fn_val,
+            "soft_precision": soft_prec,
+            "soft_recall": soft_rec,
+            "soft_f2": soft_f2_val
         }
 
         if return_preds:
