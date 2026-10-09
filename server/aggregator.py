@@ -330,10 +330,19 @@ class FedAdam(ModelAggregator):
             self.m = [np.zeros_like(layer) for layer in aggregated_gradient]
             self.v = [np.zeros_like(layer) for layer in aggregated_gradient]
 
+        # The server Adam step applies only to trainable parameters. Non-trainable weights (BatchNorm moving
+        # mean/variance) are statistics, so they take the sample-weighted client average (the plain averaged
+        # delta). Adam-stepping them moved every BN variance by ~lr per round regardless of the true change,
+        # which over long FedAdam streaks drove variances negative -> NaN predictions.
+        trainable_flags = [w.trainable for w in global_model.model.weights]
+
         self.t += 1
         new_weights = []
         for i in range(len(global_weights)):
             g = aggregated_gradient[i]
+            if not trainable_flags[i]:
+                new_weights.append(global_weights[i] + g)
+                continue
             self.m[i] = self.beta1 * self.m[i] + (1 - self.beta1) * g
             self.v[i] = self.beta2 * self.v[i] + (1 - self.beta2) * np.square(g)
             m_hat = self.m[i] / (1 - self.beta1 ** self.t)
@@ -373,19 +382,26 @@ class FedProx(ModelAggregator):
             return
 
         aggregated_weights = [np.zeros_like(layer) for layer in global_weights]
+        total_effective_weight = 0.0
         local_model = Model()
         for model_path, client_samples, *_, _ in client_data:
             local_model.model.load_weights(model_path)
             local_weights = local_model.model.get_weights()
-            
+
             # Weight sample ratio adjusted by proximal drift penalty
             drift = sum(np.linalg.norm(lw - gw) for lw, gw in zip(local_weights, global_weights))
             drift_penalty = 1.0 / (1.0 + self.mu * drift)
             effective_weight = (client_samples / total_samples) * drift_penalty
-            
+            total_effective_weight += effective_weight
+
             for i in range(len(local_weights)):
                 aggregated_weights[i] += local_weights[i] * effective_weight
-                
+
+        # Renormalize so the drift-penalized mixing weights sum to 1 (otherwise every parameter,
+        # including BatchNorm statistics and the output bias, shrinks toward zero each round)
+        if total_effective_weight > 0:
+            aggregated_weights = [layer / total_effective_weight for layer in aggregated_weights]
+
         global_model.model.set_weights(aggregated_weights)
         global_model.model.save(global_model_path)
         del global_model, local_model

@@ -66,6 +66,16 @@ def compute_dynamic_k(n_clients: int) -> int:
 
 
 def plot_metrics(round_history, output_dir):
+    """Saves plots without aborting the run if a file is locked (e.g. PNG open in a viewer on Windows)."""
+    try:
+        _plot_metrics(round_history, output_dir)
+    except OSError as e:
+        import matplotlib.pyplot as plt
+        plt.close('all')
+        print(f"[Plot Warning] Skipped saving plots this round: {e}")
+
+
+def _plot_metrics(round_history, output_dir):
     """Generates and saves research baseline performance plots."""
     import matplotlib
     matplotlib.use('Agg')
@@ -90,15 +100,16 @@ def plot_metrics(round_history, output_dir):
     plt.savefig(os.path.join(output_dir, "loss_vs_round.png"))
     plt.close()
 
-    # 2. Accuracy (F2 Score) & F1 vs Round
+    # 2. Accuracy (F2 Score), Soft F2 & F1 vs Round
     plt.figure(figsize=(8, 5))
-    plt.plot(rounds, [x.get("f2", x.get("accuracy", 0.0)) for x in round_history], marker='o', color='royalblue', label='F2 Score (Primary Accuracy)')
+    plt.plot(rounds, [x.get("f2", x.get("accuracy", 0.0)) for x in round_history], marker='o', color='royalblue', label='Hard F2 (Thresh 0.3)')
+    plt.plot(rounds, [x.get("soft_f2", 0.0) for x in round_history], marker='x', linestyle='--', color='crimson', label='Soft F2 (Probabilistic)')
     plt.plot(rounds, [x.get("f1", 0.0) for x in round_history], marker='s', color='purple', label='F1 Score')
     plt.plot(rounds, [x.get("recall", 0.0) for x in round_history], marker='^', color='forestgreen', label='Recall')
     plt.plot(rounds, [x.get("precision", 0.0) for x in round_history], marker='d', color='darkorange', label='Precision')
     plt.xlabel("Federated Round")
     plt.ylabel("Score")
-    plt.title("Global F2, F1, Recall & Precision vs Federated Round")
+    plt.title("Global F2 (Hard & Soft), F1, Recall & Precision vs Federated Round")
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
@@ -257,7 +268,17 @@ def run_simulation(args):
         gamma_meta=args.gamma_meta,
         gamma_sub=args.gamma_sub
     )
-    aggregator = get_aggregator_by_name(args.aggregator)
+    # One persistent instance per strategy so stateful aggregators (FedAdam moments, SCAFFOLD
+    # control variates, FedFV gradient history) keep their state across hierarchical switches
+    aggregator_cache = {}
+
+    def get_cached_aggregator(name):
+        key = name.lower()
+        if key not in aggregator_cache:
+            aggregator_cache[key] = get_aggregator_by_name(name)
+        return aggregator_cache[key]
+
+    aggregator = get_cached_aggregator(args.aggregator)
 
     if getattr(args, "load_selector", None):
         if os.path.exists(args.load_selector):
@@ -274,23 +295,68 @@ def run_simulation(args):
             selector.freeze()
             print(f"[Selector CLI] Selector policy frozen! No weight updates will occur during simulation.")
 
-    # 4. Initialize Global Model
-    global_model_path = os.path.join(tmp_model_dir, "global_model.keras")
-    initial_server_model = ServerModel()
-    initial_server_model.model.save(global_model_path)
-    print(f"[Research Runner] Initial global model saved to {global_model_path}")
+    if getattr(args, "freeze_client_selector", False):
+        if hasattr(selector, "sub_agent") and hasattr(selector.sub_agent, "freeze"):
+            # H3: freeze only the client-selection level; the meta-aggregator keeps learning
+            selector.sub_agent.freeze()
+            print(f"[Selector CLI] Client-selection level frozen; meta-aggregator continues learning.")
+        elif hasattr(selector, "freeze"):
+            selector.freeze()
+            print(f"[Selector CLI] Selector has no separate client level; whole selector frozen.")
 
-    # Reusable shared model instances to prevent memory leakage across 100s of rounds
-    shared_train_model = ServerModel().model
-    shared_eval_model = ServerModel().model
+    # 4. Round 0 Handshake: Metadata Aggregation for Global Bias & Global Class Weights
+    print(f"\n--- Round 0/{args.rounds} (Global Handshake & Metadata Aggregation) ---")
+    total_global_samples = 0
+    total_global_pos = 0
+
+    # Decompress every client partition once and keep it in memory (cleaned float32, shape (N, 1000, 12));
+    # re-reading the compressed .npz files every round dominated runtime
+    client_data_cache = {}
+    for cid, path in client_files.items():
+        with np.load(path) as d:
+            client_data_cache[cid] = {
+                "X_train": ClientModel._to_array(d["X_train"]),
+                "y_train": np.asarray(d["y_train"]),
+                "X_test": ClientModel._to_array(d["X_test"]),
+                "y_test": np.asarray(d["y_test"]),
+            }
+        y_tr = np.asarray(client_data_cache[cid]["y_train"], dtype=np.int32)
+        total_global_samples += len(y_tr)
+        total_global_pos += int(np.sum(y_tr == 1))
+    gc.collect()
+    cache_gb = sum(a.nbytes for c in client_data_cache.values() for a in c.values()) / 1e9
+    print(f"[Round 0] Loaded {len(client_data_cache)} client partitions into memory ({cache_gb:.2f} GB)")
+
+    total_global_neg = max(1, total_global_samples - total_global_pos)
+    p_global = total_global_pos / max(1, total_global_samples)
+    p_global_clipped = float(np.clip(p_global, 1e-5, 1.0 - 1e-5))
+    global_bias = float(np.log(p_global_clipped / (1.0 - p_global_clipped)))
+
+    # Compute Global Class Weights (used across all client local training rounds)
+    w_pos = float(total_global_samples / (2.0 * max(1, total_global_pos)))
+    w_neg = float(total_global_samples / (2.0 * max(1, total_global_neg)))
+    global_class_weights = {0: w_neg, 1: w_pos}
+
+    print(f"[Round 0] Total Global Samples: {total_global_samples} (Pos: {total_global_pos} [{p_global*100:.2f}%], Neg: {total_global_neg} [{(1-p_global)*100:.2f}%])")
+    print(f"[Round 0] Computed Global Output Bias: {global_bias:.4f}")
+    print(f"[Round 0] Computed Global Class Weights: {{0: {w_neg:.4f}, 1: {w_pos:.4f}}}")
+
+    # Initialize Global Model with Round 0 Global Bias
+    global_model_path = os.path.join(tmp_model_dir, "global_model.keras")
+    initial_server_model = ServerModel(initial_bias=global_bias)
+    initial_server_model.model.save(global_model_path)
+    print(f"[Research Runner] Initial global model (Bias={global_bias:.4f}) saved to {global_model_path}")
+
+    # Reusable shared model instances initialized with global bias
+    shared_train_model = ServerModel(initial_bias=global_bias).model
+    shared_eval_model = ServerModel(initial_bias=global_bias).model
 
     # Initialize client metrics cache directly from dataset files without Keras model overhead
     client_samples = {}
     client_losses = {}
     print("[Research Runner] Inspecting client data partitions...")
-    for cid, path in client_files.items():
-        with np.load(path, mmap_mode='r') as d:
-            client_samples[cid] = len(d['X_train'])
+    for cid in client_files:
+        client_samples[cid] = len(client_data_cache[cid]['X_train'])
         client_losses[cid] = 1.0
 
     round_history = []
@@ -322,10 +388,16 @@ def run_simulation(args):
         if hasattr(selector, "last_chosen_agg") and selector.last_chosen_agg:
             chosen_strat = selector.last_chosen_agg
             print(f"[Hierarchical Selector] Active strategy updated to: {chosen_strat}")
-            aggregator = get_aggregator_by_name(chosen_strat)
+            aggregator = get_cached_aggregator(chosen_strat)
 
         client_data = []
+        # FedFV: per-client BatchNorm moving statistics (non-trainable), averaged into the global model
+        fv_non_trainable = {}
         total_to_train = len(selected_ids)
+
+        # Read the round's global weights from disk once; reset each client's model from memory
+        shared_train_model.load_weights(global_model_path)
+        round_global_weights = shared_train_model.get_weights()
 
         # Local training (chunked/sequential execution for CPU safety)
         for idx_start in range(0, total_to_train, args.batch_clients):
@@ -347,10 +419,8 @@ def run_simulation(args):
 
                 if getattr(args, "deterministic_cost", True):
                     flops_per_sample = 2.5e6
-                    if aggregator.mode == "gradients":
-                        total_flops = n_samples * 1.0 * flops_per_sample
-                    else:
-                        total_flops = n_samples * args.local_epochs * flops_per_sample
+                    # Every strategy (including FedFV) runs local_epochs of local training
+                    total_flops = n_samples * args.local_epochs * flops_per_sample
 
                     comp_lat = float(total_flops / f_client)
                     trans_lat = float(payload_bits / r_trans)
@@ -361,17 +431,30 @@ def run_simulation(args):
                     measured_energy = float(comp_energy + trans_energy)
 
                 npz_path = client_files[cid]
-                client_model = ClientModel(npz_path, batch_size=args.batch_size, model=shared_train_model)
-                client_model.model.load_weights(global_model_path)
+                client_model = ClientModel(
+                    npz_path,
+                    batch_size=args.batch_size,
+                    model=shared_train_model,
+                    initial_bias=global_bias,
+                    class_weights=global_class_weights,
+                    data=client_data_cache[cid]
+                )
+                client_model.model.set_weights(round_global_weights)
 
                 if aggregator.mode == "gradients":
-                    # FedFV style gradient-based training
+                    # FedFV: run the same local_epochs of local training as the weight-based strategies and
+                    # send the pseudo-gradient (global - local) over trainable variables for conflict resolution
+                    global_trainable = [v.numpy().copy() for v in client_model.model.trainable_variables]
                     t0 = time.time()
-                    avg_grads, local_loss = client_model.train_local_gradients_fv()
+                    client_model.train(epochs=args.local_epochs, verbose=0)
                     t_wall = time.time() - t0
                     if not getattr(args, "deterministic_cost", True):
                         comp_lat = float(t_wall * (f_ref / f_client))
                         measured_energy = float(comp_lat * p_draw)
+
+                    avg_grads = [g - v.numpy() for g, v in zip(global_trainable, client_model.model.trainable_variables)]
+                    fv_non_trainable[num_id] = ([v.numpy().copy() for v in client_model.model.non_trainable_variables], n_samples)
+                    local_loss = client_model.evaluate().get("loss", 1.0)
 
                     client_losses[cid] = float(local_loss)
                     client_data.append((avg_grads, n_samples, local_loss, num_id, comp_lat, measured_energy))
@@ -428,20 +511,27 @@ def run_simulation(args):
                     c_weights = np.concatenate([v.numpy().flatten() for v in shared_eval_model.trainable_variables])
                     deltas_dict[cid] = c_weights - g_weights
 
+            client_norms = []
             if deltas_dict:
                 avg_delta = np.mean(list(deltas_dict.values()), axis=0)
                 norm_avg = np.linalg.norm(avg_delta)
                 for cid, delta in deltas_dict.items():
-                    norm_d = np.linalg.norm(delta)
+                    norm_d = float(np.linalg.norm(delta))
+                    client_norms.append(norm_d)
                     if norm_d > 1e-8 and norm_avg > 1e-8:
                         sim = float(np.dot(delta, avg_delta) / (norm_d * norm_avg))
                     else:
                         sim = 0.0
                     client_grad_sims[cid] = sim
+            
+            mean_client_grad_norm = float(np.mean(client_norms)) if client_norms else 0.0
+            max_client_grad_norm = float(np.max(client_norms)) if client_norms else 0.0
+            min_client_grad_norm = float(np.min(client_norms)) if client_norms else 0.0
             del deltas_dict
             gc.collect()
         except Exception as e:
             print(f"[GradSim Warning] Could not calculate gradient similarities: {e}")
+            mean_client_grad_norm, max_client_grad_norm, min_client_grad_norm = 0.0, 0.0, 0.0
 
         # Check Training Response Threshold tau_train = 0.5 * K
         tau_train = 0.5 * args.select_k
@@ -450,6 +540,7 @@ def run_simulation(args):
         if n_responding_train < tau_train:
             print(f"[Training Dropout Warning] Responding training clients ({n_responding_train}) below threshold ({tau_train:.1f}). Skipping weight aggregation.")
             dropped_training = True
+            global_grad_norm = 0.0
         else:
             dropped_training = False
             # Aggregation Phase
@@ -458,17 +549,42 @@ def run_simulation(args):
                 assert isinstance(aggregator, FedFV)
                 global_gt = aggregator.aggregate(client_data, global_model_path, current_round=r, ModelClass=ServerModel)
                 
-                # Apply global gradients back to global model
+                # Apply the conflict-resolved pseudo-gradient with server learning rate 1.0
+                # (equivalent to a FedAvg step when no client updates conflict)
+                fedfv_server_lr = 1.0
                 gm = ServerModel()
                 gm.model.load_weights(global_model_path)
-                
+
                 trainable_vars = gm.model.trainable_variables
                 for var, gg in zip(trainable_vars, global_gt):
-                    var.assign(var.numpy() - (0.001 * gg))
+                    var.assign(var.numpy() - (fedfv_server_lr * gg))
+
+                # Sample-weighted average of BatchNorm moving statistics from the participating clients
+                if fv_non_trainable:
+                    total_nt_samples = sum(s for _, s in fv_non_trainable.values())
+                    for v_idx, var in enumerate(gm.model.non_trainable_variables):
+                        var.assign(sum(nt[v_idx] * (s / total_nt_samples) for nt, s in fv_non_trainable.values()))
                 gm.model.save(global_model_path)
                 del gm
             else:
                 aggregator.aggregate(client_data, global_model_path, current_round=r)
+
+            # Calculate Global Model Weight Update L2 Norm
+            try:
+                shared_eval_model.load_weights(global_model_path)
+                new_g_weights = np.concatenate([v.numpy().flatten() for v in shared_eval_model.trainable_variables])
+                global_grad_norm = float(np.linalg.norm(new_g_weights - g_weights))
+            except Exception:
+                global_grad_norm = 0.0
+
+        # Numerical safety guard for NaN / Inf values
+        if np.isnan(global_grad_norm) or np.isinf(global_grad_norm):
+            print(f"[Numerical Safety Warning] Round {r}: Global gradient norm is NaN/Inf ({global_grad_norm}). Sanitizing to 0.0.")
+            global_grad_norm = 0.0
+        if np.isnan(mean_client_grad_norm) or np.isinf(mean_client_grad_norm):
+            mean_client_grad_norm = 0.0
+        if np.isnan(max_client_grad_norm) or np.isinf(max_client_grad_norm):
+            max_client_grad_norm = 0.0
 
         # Clean temporary local weight files created during training
         for item in client_data:
@@ -482,19 +598,28 @@ def run_simulation(args):
         elapsed_round = time.time() - start_round_time
 
         # Evaluation Phase across ALL clients in the federation
-        is_auprc_round = (r == 1 or r % 10 == 0)
+        is_auprc_round = True
         print(f"[Evaluation] Evaluating updated global model on all {len(client_ids)} clients (Threshold 0.3 | AUPRC Round: {is_auprc_round})...")
         eval_results = []
         all_y_true = []
         all_y_score = []
 
+        # Every client evaluates the same global model: load it once per round
+        shared_eval_model.load_weights(global_model_path)
+
         for idx_start in range(0, len(client_ids), args.batch_clients):
             chunk_cids = client_ids[idx_start:idx_start + args.batch_clients]
 
             for cid in chunk_cids:
-                cm = ClientModel(client_files[cid], batch_size=args.batch_size, model=shared_eval_model)
-                cm.model.load_weights(global_model_path)
-                
+                cm = ClientModel(
+                    client_files[cid],
+                    batch_size=args.batch_size,
+                    model=shared_eval_model,
+                    initial_bias=global_bias,
+                    class_weights=global_class_weights,
+                    data=client_data_cache[cid]
+                )
+
                 if is_auprc_round:
                     e_res, y_t, y_s = cm.evaluate(threshold=0.3, return_preds=True)
                     if len(y_t) > 0:
@@ -532,13 +657,24 @@ def run_simulation(args):
                 global_raw_acc = prev.get("raw_accuracy", 0.0)
                 avg_loss = prev.get("loss", 1.0)
                 global_auprc = prev.get("auprc", 0.5)
+
+                # Soft confusion constructs quorum fallback
+                total_soft_tp = prev.get("soft_tp", 0.0)
+                total_soft_fp = prev.get("soft_fp", 0.0)
+                total_soft_tn = prev.get("soft_tn", 0.0)
+                total_soft_fn = prev.get("soft_fn", 0.0)
+                global_soft_prec = prev.get("soft_precision", 0.0)
+                global_soft_rec = prev.get("soft_recall", 0.0)
+                global_soft_f2 = prev.get("soft_f2", 0.0)
             else:
                 total_tp, total_fp, total_tn, total_fn = 0, 0, 0, 0
                 global_prec, global_rec, global_f1, global_f2, global_raw_acc = 0.0, 0.0, 0.0, 0.0, 0.0
                 avg_loss = 1.0
                 global_auprc = 0.5
+                total_soft_tp, total_soft_fp, total_soft_tn, total_soft_fn = 0.0, 0.0, 0.0, 0.0
+                global_soft_prec, global_soft_rec, global_soft_f2 = 0.0, 0.0, 0.0
         else:
-            # Global Micro-Aggregation of Confusion Matrix Counts across evaluating clients
+            # Global Micro-Aggregation of Hard Confusion Matrix Counts across evaluating clients
             total_tp = sum(int(ev["metrics"].get("tp", 0)) for ev in eval_results)
             total_fp = sum(int(ev["metrics"].get("fp", 0)) for ev in eval_results)
             total_tn = sum(int(ev["metrics"].get("tn", 0)) for ev in eval_results)
@@ -556,6 +692,18 @@ def run_simulation(args):
             total_eval_samples = total_tp + total_tn + total_fp + total_fn
             global_raw_acc = float((total_tp + total_tn) / (total_eval_samples + 1e-8)) if total_eval_samples > 0 else 0.0
             avg_loss = float(np.mean([ev["metrics"]["loss"] for ev in eval_results])) if eval_results else 1.0
+
+            # Global Micro-Aggregation of Soft (Probability-Weighted) Confusion Counts (Training Reward Construct Only)
+            total_soft_tp = float(sum(float(ev["metrics"].get("soft_tp", 0.0)) for ev in eval_results))
+            total_soft_fp = float(sum(float(ev["metrics"].get("soft_fp", 0.0)) for ev in eval_results))
+            total_soft_tn = float(sum(float(ev["metrics"].get("soft_tn", 0.0)) for ev in eval_results))
+            total_soft_fn = float(sum(float(ev["metrics"].get("soft_fn", 0.0)) for ev in eval_results))
+
+            eps = 1e-7
+            global_soft_prec = float(total_soft_tp / (total_soft_tp + total_soft_fp + eps))
+            global_soft_rec = float(total_soft_tp / (total_soft_tp + total_soft_fn + eps))
+            denom_soft_f2 = (4 * global_soft_prec + global_soft_rec)
+            global_soft_f2 = float((5 * global_soft_prec * global_soft_rec) / denom_soft_f2) if denom_soft_f2 > 0 else 0.0
 
             # Periodic Global AUPRC Computation (Every 10 Rounds & Round 1)
             global_auprc = None
@@ -581,7 +729,7 @@ def run_simulation(args):
             "seed": args.seed,
             "round": r,
             "loss": avg_loss,
-            "accuracy": global_f2,  # Primary accuracy metric defined as F2 score
+            "accuracy": global_f2,  # Primary clinical/paper reporting metric (Hard 0.3 threshold F2)
             "f2": global_f2,
             "f1": global_f1,
             "precision": global_prec,
@@ -594,19 +742,40 @@ def run_simulation(args):
             "auprc": global_auprc if global_auprc is not None else 0.0,
             "avg_comp_latency": float(np.mean(latencies)) if latencies else 0.0,
             "total_round_energy": float(np.sum(energies)) if energies else 0.0,
-            "chosen_strategy": getattr(selector, "last_chosen_agg", args.aggregator)
+            "global_grad_norm": global_grad_norm,
+            "mean_client_grad_norm": mean_client_grad_norm,
+            "max_client_grad_norm": max_client_grad_norm,
+            "min_client_grad_norm": min_client_grad_norm,
+            "chosen_strategy": getattr(selector, "last_chosen_agg", args.aggregator),
+            # Training-reward soft confusion constructs (not clinical/paper reporting metrics)
+            "soft_tp": total_soft_tp,
+            "soft_fp": total_soft_fp,
+            "soft_tn": total_soft_tn,
+            "soft_fn": total_soft_fn,
+            "soft_precision": global_soft_prec,
+            "soft_recall": global_soft_rec,
+            "soft_f2": global_soft_f2
         }
 
         round_history.append(round_metrics)
 
-        print(f" Round {r} Results | Loss: {round_metrics['loss']:.4f} | F2 (Acc): {global_f2:.4f} | F1: {global_f1:.4f} | Rec: {global_rec:.4f} | Prec: {global_prec:.4f} | Time: {elapsed_round:.2f}s")
+        print(f" Round {r} Results | Loss: {round_metrics['loss']:.4f} | GradNorm (Global/Mean/Max): {global_grad_norm:.4f}/{mean_client_grad_norm:.4f}/{max_client_grad_norm:.4f} | Hard-F2: {global_f2:.4f} | Soft-F2: {global_soft_f2:.4f} | Rec: {global_rec:.4f} | Prec: {global_prec:.4f} | Time: {elapsed_round:.2f}s")
+
+        # Early termination guard: If NaN / Inf is detected in loss, metrics, or gradient norms, terminate loop immediately
+        if (np.isnan(avg_loss) or np.isinf(avg_loss) or
+            np.isnan(global_grad_norm) or np.isinf(global_grad_norm) or
+            np.isnan(global_f2) or np.isnan(global_soft_f2)):
+            print(f"\n[CRITICAL NUMERICAL STABILITY ERROR] Round {r}: NaN/Inf detected (Loss={avg_loss}, GradNorm={global_grad_norm}). Terminating simulation loop immediately.")
+            plot_metrics(round_history, args.output_dir)
+            break
 
         # Update Client Selector Policy (RL / Contextual Bandits)
         prev_loss = round_history[-2]["loss"] if len(round_history) > 1 else round_metrics["loss"]
         global_loss_delta = prev_loss - round_metrics["loss"]
 
-        prev_acc = round_history[-2]["accuracy"] if len(round_history) > 1 else 0.0
-        global_acc_delta = round_metrics.get("accuracy", 0.0) - prev_acc
+        # RL Meta-Aggregator Reward uses continuous Soft-F2 delta to prevent hard-threshold recall collapse artifacts
+        prev_soft_f2 = round_history[-2].get("soft_f2", round_metrics.get("soft_f2", 0.0)) if len(round_history) > 1 else round_metrics.get("soft_f2", 0.0)
+        global_acc_delta = round_metrics.get("soft_f2", 0.0) - prev_soft_f2
 
         client_accuracies = {ev["client_id"]: float(ev["metrics"].get("accuracy", 0.0)) for ev in eval_results}
 
@@ -653,7 +822,9 @@ def run_simulation(args):
                 writer.writeheader()
                 writer.writerows(round_history)
 
-        plot_metrics(round_history, args.output_dir)
+        # Plots are refreshed every 10 rounds and at the end (metrics files are still written every round)
+        if r % 10 == 0 or r == args.rounds:
+            plot_metrics(round_history, args.output_dir)
 
     # Cleanup temporary models directory
     if os.path.exists(tmp_model_dir):
@@ -699,6 +870,7 @@ if __name__ == "__main__":
     parser.add_argument("--save-selector", type=str, default=None, help="File path to save trained selector parameters (e.g. trained_selector.npz)")
     parser.add_argument("--load-selector", type=str, default=None, help="File path to load pre-trained selector parameters")
     parser.add_argument("--freeze-selector", action="store_true", help="Freeze loaded selector policy (no parameter updates during evaluation)")
+    parser.add_argument("--freeze-client-selector", action="store_true", help="Freeze only the client-selection level of a hierarchical selector (meta-aggregator keeps learning); for H3")
 
     parsed_args = parser.parse_args()
 

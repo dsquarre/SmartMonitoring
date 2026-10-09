@@ -774,7 +774,11 @@ class MetaAggregatorAgent:
     """
     STRATEGIES = ["FedAvg", "qFedAvg", "FedFV", "FedAdam", "FedProx", "Krum", "SCAFFOLD"]
 
-    def __init__(self, mode: str = "d-linucb", alpha: float = 1.0, gamma: float = 0.95, sigma: float = 0.25, feature_dim: int = 20):
+    # Raw state entries at or beyond this magnitude are the inf/unobserved sentinel (nan_to_num posinf=1e6)
+    UNOBSERVED_SENTINEL = 1e6
+
+    def __init__(self, mode: str = "d-linucb", alpha: float = 1.0, gamma: float = 0.95, sigma: float = 0.25,
+                 feature_dim: int = 20, num_numeric: int = None, norm_alpha: float = 0.05, z_clip: float = 3.0):
         self.mode = mode.lower()
         self.alpha = alpha
         self.gamma = gamma
@@ -785,8 +789,54 @@ class MetaAggregatorAgent:
         self.b = [np.zeros((feature_dim, 1), dtype=np.float64) for _ in range(self.num_actions)]
         self.last_action_idx = 0
 
+        # Online per-feature standardization of the leading numeric features of G_t
+        # (trailing one-hot features are passed through unchanged)
+        self.num_numeric = feature_dim if num_numeric is None else int(num_numeric)
+        self.norm_alpha = norm_alpha
+        self.z_clip = z_clip
+        self._init_normalizer()
+        self._last_raw = None
+        self._last_x = None
+
+    def _init_normalizer(self):
+        self.norm_mean = np.zeros(self.num_numeric, dtype=np.float64)
+        self.norm_var = np.ones(self.num_numeric, dtype=np.float64)
+        self.norm_init = np.zeros(self.num_numeric, dtype=bool)
+
+    def _prepare_state(self, global_state: np.ndarray, update_stats: bool) -> np.ndarray:
+        """
+        Maps raw G_t to the regression feature vector: numeric features are z-scored against an
+        exponential running mean/variance and clipped to [-z_clip, z_clip]; unobserved (inf/sentinel)
+        features map to 0.0 so they cannot dominate the D-LinUCB design matrix.
+        """
+        raw = np.asarray(global_state, dtype=np.float64).reshape(-1)
+        x = np.nan_to_num(raw.copy(), nan=0.0, posinf=0.0, neginf=0.0)
+        n = min(self.num_numeric, len(raw))
+        for j in range(n):
+            v = raw[j]
+            if not np.isfinite(v) or abs(v) >= self.UNOBSERVED_SENTINEL:
+                x[j] = 0.0
+                continue
+            if update_stats:
+                if not self.norm_init[j]:
+                    self.norm_mean[j] = v
+                    self.norm_var[j] = 1.0
+                    self.norm_init[j] = True
+                else:
+                    diff = v - self.norm_mean[j]
+                    self.norm_mean[j] += self.norm_alpha * diff
+                    self.norm_var[j] = (1.0 - self.norm_alpha) * self.norm_var[j] + self.norm_alpha * diff ** 2
+            if self.norm_init[j]:
+                z = (v - self.norm_mean[j]) / np.sqrt(max(self.norm_var[j], 1e-6))
+                x[j] = float(np.clip(z, -self.z_clip, self.z_clip))
+            else:
+                x[j] = 0.0
+        return x
+
     def select_strategy(self, global_state: np.ndarray) -> Tuple[int, str]:
-        clean_state = np.nan_to_num(global_state, nan=0.0, posinf=1e6, neginf=-1e6)
+        clean_state = self._prepare_state(global_state, update_stats=not getattr(self, "is_frozen", False))
+        self._last_raw = np.asarray(global_state, dtype=np.float64).reshape(-1).copy()
+        self._last_x = clean_state
         x = clean_state.reshape(-1, 1)
         scores = np.zeros(self.num_actions, dtype=np.float64)
 
@@ -824,10 +874,20 @@ class MetaAggregatorAgent:
             print(f"[Meta-Controller Agent] Policy is frozen. Skipping parameter update.")
             return
 
-        clean_state = np.nan_to_num(global_state, nan=0.0, posinf=1e6, neginf=-1e6)
+        raw = np.asarray(global_state, dtype=np.float64).reshape(-1)
+        if self._last_raw is not None and raw.shape == self._last_raw.shape and np.array_equal(raw, self._last_raw):
+            clean_state = self._last_x
+        else:
+            clean_state = self._prepare_state(raw, update_stats=False)
         x = clean_state.reshape(-1, 1)
-        self.A[action_idx] = self.gamma * self.A[action_idx] + (1.0 - self.gamma) * np.eye(self.feature_dim, dtype=np.float64) + (x @ x.T)
-        self.b[action_idx] = self.gamma * self.b[action_idx] + reward * x
+
+        # D-LinUCB: discount every arm each round so unplayed arms regain uncertainty, then add the new observation
+        eye = np.eye(self.feature_dim, dtype=np.float64)
+        for k in range(self.num_actions):
+            self.A[k] = self.gamma * self.A[k] + (1.0 - self.gamma) * eye
+            self.b[k] = self.gamma * self.b[k]
+        self.A[action_idx] += x @ x.T
+        self.b[action_idx] += reward * x
         print(f"[Meta-Controller ({self.mode.upper()})] Updated weights for strategy '{self.STRATEGIES[action_idx]}' (gamma={self.gamma}).")
 
     def freeze(self):
@@ -842,9 +902,24 @@ class MetaAggregatorAgent:
             A=np.stack(self.A),
             b=np.stack(self.b),
             feature_dim=np.array([self.feature_dim], dtype=np.int32),
-            mode=np.array([self.mode], dtype=object)
+            mode=np.array([self.mode], dtype=object),
+            **self.normalizer_state()
         )
         print(f"[Meta-Controller Agent] Saved parameters to {filepath}")
+
+    def normalizer_state(self, prefix: str = "") -> Dict[str, np.ndarray]:
+        return {
+            f"{prefix}norm_mean": self.norm_mean,
+            f"{prefix}norm_var": self.norm_var,
+            f"{prefix}norm_init": self.norm_init
+        }
+
+    def load_normalizer_state(self, data, prefix: str = ""):
+        if f"{prefix}norm_mean" in data:
+            self.norm_mean = data[f"{prefix}norm_mean"].astype(np.float64)
+            self.norm_var = data[f"{prefix}norm_var"].astype(np.float64)
+            self.norm_init = data[f"{prefix}norm_init"].astype(bool)
+            self.num_numeric = len(self.norm_mean)
 
     def load_state(self, filepath: str):
         data = np.load(filepath, allow_pickle=True)
@@ -852,6 +927,7 @@ class MetaAggregatorAgent:
         self.b = [data["b"][i].astype(np.float64) for i in range(len(data["b"]))]
         if "feature_dim" in data:
             self.feature_dim = int(data["feature_dim"][0])
+        self.load_normalizer_state(data)
         print(f"[Meta-Controller Agent] Loaded parameters from {filepath}")
 
 
@@ -862,7 +938,7 @@ class HierarchicalFLSelector(ClientSelector):
     Level 2: LinUCBAgent selects Top-K Clients conditioned on chosen Aggregation Strategy using 14-dim X_t state vector.
     """
     def __init__(self, meta_agent: MetaAggregatorAgent = None, sub_agent: LinUCBAgent = None, env: Any = None):
-        self.meta_agent = meta_agent or MetaAggregatorAgent(feature_dim=20)
+        self.meta_agent = meta_agent or MetaAggregatorAgent(feature_dim=20, num_numeric=13)
         self.sub_agent = sub_agent or LinUCBAgent(feature_dim=14)
         self.env = env
 
@@ -920,7 +996,8 @@ class HierarchicalFLSelector(ClientSelector):
             meta_dim=meta_dim,
             sub_A=sub_A,
             sub_b=sub_b,
-            sub_dim=sub_dim
+            sub_dim=sub_dim,
+            **self.meta_agent.normalizer_state(prefix="meta_")
         )
         print(f"[HierarchicalFLSelector] Saved combined selector parameters to {filepath}")
 
@@ -930,11 +1007,23 @@ class HierarchicalFLSelector(ClientSelector):
             self.meta_agent.A = [data["meta_A"][i].astype(np.float64) for i in range(len(data["meta_A"]))]
             self.meta_agent.b = [data["meta_b"][i].astype(np.float64) for i in range(len(data["meta_b"]))]
             self.meta_agent.feature_dim = int(data["meta_dim"][0])
+            self.meta_agent.load_normalizer_state(data, prefix="meta_")
         if "sub_A" in data:
             self.sub_agent.A = data["sub_A"].astype(np.float64)
             self.sub_agent.b = data["sub_b"].astype(np.float64)
             self.sub_agent.feature_dim = int(data["sub_dim"][0])
             self.sub_agent.recompute_inv = True
+        elif "A" in data and "b" in data:
+            # A single-level LinUCB client-selector file (e.g. saved by `-s linucb --save-selector`):
+            # load it into the client level when the feature dimensions match (H3 shared frozen selector).
+            A = data["A"].astype(np.float64)
+            if A.shape[0] != self.sub_agent.feature_dim:
+                raise ValueError(f"Client-selector file has {A.shape[0]} features but this selector's client level "
+                                 f"uses {self.sub_agent.feature_dim}; use '-s unconditioned' (7 client features).")
+            self.sub_agent.A = A
+            self.sub_agent.b = data["b"].astype(np.float64)
+            self.sub_agent.recompute_inv = True
+            print(f"[HierarchicalFLSelector] Loaded single-level LinUCB client selector into the client level")
         print(f"[HierarchicalFLSelector] Loaded combined selector parameters from {filepath}")
 
     def select_clients(self, client_ids: List[str], k: int, context: Dict[str, Any] = None) -> List[str]:
@@ -1006,7 +1095,8 @@ class HierarchicalFLSelector(ClientSelector):
 
         anomaly_frac = float(compute_mad_anomaly_fraction(self.client_grad_sim, self.last_selected_ids, kappa=2.5))
 
-        rounds_switch = float(self.rounds_since_last_switch)
+        # Capped and scaled to [0, 1] so a long streak on one strategy cannot self-reinforce without bound
+        rounds_switch = float(min(self.rounds_since_last_switch, 10) / 10.0)
 
         one_hot_last_action = [0.0] * len(MetaAggregatorAgent.STRATEGIES)
         if 0 <= self.last_agg_idx < len(one_hot_last_action):
@@ -1328,7 +1418,7 @@ def get_selector_by_name(name: str, **kwargs) -> ClientSelector:
         return RLClientSelector(agent, env)
     elif name_lower == "hierarchical":
         env = kwargs.get("env")
-        meta_agent = kwargs.get("meta_agent") or MetaAggregatorAgent(feature_dim=20, gamma=gamma_meta)
+        meta_agent = kwargs.get("meta_agent") or MetaAggregatorAgent(feature_dim=20, num_numeric=13, gamma=gamma_meta)
         sub_agent = kwargs.get("sub_agent") or LinUCBAgent(feature_dim=14, gamma=gamma_sub)
         return HierarchicalFLSelector(meta_agent=meta_agent, sub_agent=sub_agent, env=env)
     elif name_lower in ["oort", "oort_hierarchical", "simple_hierarchical"]:

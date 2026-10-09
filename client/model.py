@@ -5,12 +5,13 @@ from sklearn.utils.class_weight import compute_class_weight
 
 
 class Model:
-    def __init__(self, path, batch_size=32, model=None):
+    def __init__(self, path, batch_size=32, model=None, initial_bias=None, class_weights=None, data=None):
         self.dataset_name = path
         self.batch_size = batch_size
 
-        # Memory-mapped access to client partition
-        self.data = np.load(path, mmap_mode='r')
+        # Client partition: pre-loaded in-memory arrays if given (dict with X_train/y_train/X_test/y_test),
+        # otherwise memory-mapped access to the .npz file
+        self.data = data if data is not None else np.load(path, mmap_mode='r')
         self.X_train = self.data['X_train']
         self.y_train = self.data['y_train']
         self.X_test = self.data['X_test']
@@ -19,25 +20,41 @@ class Model:
         self.num_train_samples = len(self.X_train)
         self.num_test_samples = len(self.X_test)
 
-        # Calculate local class balancing weights
-        train_labels = np.array(self.y_train, dtype=np.int32)
-        unique_classes = np.unique(train_labels)
-        if len(unique_classes) > 1:
-            weights = compute_class_weight('balanced', classes=unique_classes, y=train_labels)
-            self.class_weights = {int(c): float(w) for c, w in zip(unique_classes, weights)}
-            self.pos_weight = float(weights[1])
-            self.neg_weight = float(weights[0])
+        # Set or calculate class balancing weights
+        if class_weights is not None:
+            self.class_weights = {int(k): float(v) for k, v in class_weights.items()}
+            self.pos_weight = float(self.class_weights.get(1, 1.0))
+            self.neg_weight = float(self.class_weights.get(0, 1.0))
         else:
-            self.class_weights = {0: 1.0, 1: 1.0}
-            self.pos_weight = 1.0
-            self.neg_weight = 1.0
+            train_labels = np.array(self.y_train, dtype=np.int32)
+            unique_classes = np.unique(train_labels)
+            if len(unique_classes) > 1:
+                weights = compute_class_weight('balanced', classes=unique_classes, y=train_labels)
+                self.class_weights = {int(c): float(w) for c, w in zip(unique_classes, weights)}
+                self.pos_weight = float(weights[1])
+                self.neg_weight = float(weights[0])
+            else:
+                self.class_weights = {0: 1.0, 1: 1.0}
+                self.pos_weight = 1.0
+                self.neg_weight = 1.0
 
         if model is not None:
             self.model = model
         else:
-            self.model = self.build_model()
+            self.model = self.build_model(initial_bias=initial_bias)
 
-    def build_model(self):
+    def get_class_counts(self):
+        """Returns local train partition total and positive sample counts for Round 0 handshake."""
+        train_labels = np.array(self.y_train, dtype=np.int32)
+        pos_count = int(np.sum(train_labels == 1))
+        neg_count = int(np.sum(train_labels == 0))
+        return {
+            "total": len(train_labels),
+            "pos": pos_count,
+            "neg": neg_count
+        }
+
+    def build_model(self, initial_bias=None):
         inputs = tf.keras.Input(shape=(1000, 12), name='ecg_input')
 
         # Block 1
@@ -58,7 +75,16 @@ class Model:
         # Classification Head
         x = tf.keras.layers.Dense(128, activation='relu')(x)
         x = tf.keras.layers.Dropout(0.4)(x)
-        output = tf.keras.layers.Dense(1, activation='sigmoid', name='afib')(x)
+        
+        # Classification Output Layer with dynamic or default prior bias
+        bias_val = initial_bias if initial_bias is not None else -2.2
+        bias_init = tf.keras.initializers.Constant(bias_val)
+        output = tf.keras.layers.Dense(
+            1,
+            activation='sigmoid',
+            bias_initializer=bias_init,
+            name='afib'
+        )(x)
 
         model = tf.keras.Model(inputs=inputs, outputs=output)
         model.compile(
@@ -82,21 +108,23 @@ class Model:
 
         for start in range(0, len(indices), self.batch_size):
             batch_idx = indices[start:start + self.batch_size]
-            X_batch = []
-            y_batch = []
 
-            for idx in batch_idx:
-                x_sample = X[idx]
-                if x_sample.shape[0] == 12 and x_sample.shape[1] != 12:
-                    x_sample = np.transpose(x_sample, (1, 0))
+            # Vectorized batch assembly (same values and order as per-sample processing)
+            X_batch = np.asarray(X[batch_idx])
+            if X_batch.shape[1] == 12 and X_batch.shape[2] != 12:
+                X_batch = np.transpose(X_batch, (0, 2, 1))
+            X_batch = np.nan_to_num(X_batch, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+            y_batch = np.asarray(y[batch_idx]).astype(np.float32)
 
-                x_sample = np.nan_to_num(x_sample, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
-                y_sample = np.float32(y[idx])
+            yield X_batch, y_batch
 
-                X_batch.append(x_sample)
-                y_batch.append(y_sample)
-
-            yield np.array(X_batch, dtype=np.float32), np.array(y_batch, dtype=np.float32)
+    @staticmethod
+    def _to_array(X):
+        """Loads a client partition into memory as float32 (N, 1000, 12) with NaN/Inf zeroed."""
+        X_arr = np.asarray(X)
+        if X_arr.ndim == 3 and X_arr.shape[1] == 12 and X_arr.shape[2] != 12:
+            X_arr = np.transpose(X_arr, (0, 2, 1))
+        return np.nan_to_num(X_arr, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
 
     def get_dataset(self, X, y, shuffle=True):
         dataset = tf.data.Dataset.from_generator(
@@ -110,13 +138,16 @@ class Model:
 
     def train(self, epochs=5, verbose=0):
         """Standard local training for FedAvg, FedProx, etc."""
-        train_ds = self.get_dataset(self.X_train, self.y_train, shuffle=True)
-        steps_per_epoch = max(1, int(np.ceil(self.num_train_samples / self.batch_size)))
+        # Client partitions are small (~200 ECGs), so train from in-memory arrays (reshuffled every epoch)
+        X_train = self._to_array(self.X_train)
+        y_train = np.asarray(self.y_train).astype(np.float32)
 
         history = self.model.fit(
-            train_ds,
+            X_train,
+            y_train,
+            batch_size=self.batch_size,
             epochs=epochs,
-            steps_per_epoch=steps_per_epoch,
+            shuffle=True,
             class_weight=self.class_weights,
             verbose=verbose
         )
@@ -180,18 +211,30 @@ class Model:
             "tp": 0,
             "fp": 0,
             "tn": 0,
-            "fn": 0
+            "fn": 0,
+            # Training-reward soft confusion constructs (not clinical/paper reporting metrics)
+            "soft_tp": 0.0,
+            "soft_fp": 0.0,
+            "soft_tn": 0.0,
+            "soft_fn": 0.0,
+            "soft_precision": 0.0,
+            "soft_recall": 0.0,
+            "soft_f2": 0.0
         }
         if self.num_test_samples == 0:
             if return_preds:
                 return empty_res, np.array([], dtype=int), np.array([], dtype=np.float32)
             return empty_res
 
-        test_ds = self.get_dataset(self.X_test, self.y_test, shuffle=False)
-        steps = max(1, int(np.ceil(self.num_test_samples / self.batch_size)))
-
-        preds = self.model.predict(test_ds, steps=steps, verbose=0)
-        preds_flat = preds.flatten()[:self.num_test_samples]
+        # Inference-mode forward pass on in-memory batches (avoids per-call tf.data/predict overhead;
+        # batch size does not affect inference-mode outputs)
+        X_test = self._to_array(self.X_test)
+        eval_batch = max(self.batch_size, 256)
+        preds = [
+            np.asarray(self.model.predict_on_batch(X_test[start:start + eval_batch]))
+            for start in range(0, self.num_test_samples, eval_batch)
+        ]
+        preds_flat = np.concatenate(preds).flatten()[:self.num_test_samples]
         pred_binary = (preds_flat >= threshold).astype(int)
 
         y_true = np.array(self.y_test[:self.num_test_samples], dtype=int)
@@ -206,28 +249,54 @@ class Model:
         else:
             auc_val = 0.5
 
-        prec = float(precision_score(y_true, pred_binary, zero_division=0))
-        rec = float(recall_score(y_true, pred_binary, zero_division=0))
-        denom_f2 = (4 * prec + rec)
-        f2_val = float((5 * prec * rec) / denom_f2) if denom_f2 > 0 else 0.0
-
         tp_val = int(np.sum((y_true == 1) & (pred_binary == 1)))
         tn_val = int(np.sum((y_true == 0) & (pred_binary == 0)))
         fp_val = int(np.sum((y_true == 0) & (pred_binary == 1)))
         fn_val = int(np.sum((y_true == 1) & (pred_binary == 0)))
+
+        # Hard threshold 0.3 metrics (Primary clinical/paper reporting standard), computed from the
+        # confusion counts (identical to sklearn precision/recall/f1 with zero_division=0)
+        prec = float(tp_val / (tp_val + fp_val)) if (tp_val + fp_val) > 0 else 0.0
+        rec = float(tp_val / (tp_val + fn_val)) if (tp_val + fn_val) > 0 else 0.0
+        f1_val = float(2 * tp_val / (2 * tp_val + fp_val + fn_val)) if (2 * tp_val + fp_val + fn_val) > 0 else 0.0
+        denom_f2 = (4 * prec + rec)
+        f2_val = float((5 * prec * rec) / denom_f2) if denom_f2 > 0 else 0.0
+
+        # Soft (Probability-Weighted) Confusion Counts & Soft-F2 (Training Reward Construct Only)
+        pos_mask = (y_true == 1)
+        neg_mask = (y_true == 0)
+        soft_tp_val = float(np.sum(preds_clipped[pos_mask])) if np.any(pos_mask) else 0.0
+        soft_fn_val = float(np.sum(1.0 - preds_clipped[pos_mask])) if np.any(pos_mask) else 0.0
+        soft_fp_val = float(np.sum(preds_clipped[neg_mask])) if np.any(neg_mask) else 0.0
+        soft_tn_val = float(np.sum(1.0 - preds_clipped[neg_mask])) if np.any(neg_mask) else 0.0
+
+        denom_soft_prec = soft_tp_val + soft_fp_val + eps
+        denom_soft_rec = soft_tp_val + soft_fn_val + eps
+        soft_prec = float(soft_tp_val / denom_soft_prec)
+        soft_rec = float(soft_tp_val / denom_soft_rec)
+        denom_soft_f2 = (4 * soft_prec + soft_rec)
+        soft_f2_val = float((5 * soft_prec * soft_rec) / denom_soft_f2) if denom_soft_f2 > 0 else 0.0
 
         metrics_dict = {
             "loss": loss_val,
             "accuracy": f2_val,
             "precision": prec,
             "recall": rec,
-            "f1": float(f1_score(y_true, pred_binary, zero_division=0)),
+            "f1": f1_val,
             "f2": f2_val,
             "roc_auc": auc_val,
             "tp": tp_val,
             "fp": fp_val,
             "tn": tn_val,
-            "fn": fn_val
+            "fn": fn_val,
+            # Training-reward soft confusion constructs (not clinical/paper reporting metrics)
+            "soft_tp": soft_tp_val,
+            "soft_fp": soft_fp_val,
+            "soft_tn": soft_tn_val,
+            "soft_fn": soft_fn_val,
+            "soft_precision": soft_prec,
+            "soft_recall": soft_rec,
+            "soft_f2": soft_f2_val
         }
 
         if return_preds:
