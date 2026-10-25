@@ -22,3 +22,6 @@ results/
 dashboard/node_modules
 datasets/
 run/
+*.bat
+.ipynb_checkpoints
+.agents

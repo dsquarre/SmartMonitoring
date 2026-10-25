@@ -97,6 +97,9 @@ class TestClientModel(unittest.TestCase):
         for x_batch, y_batch in ds.take(1):
             self.assertEqual(x_batch.shape[1:], (1000, 12))
             self.assertEqual(y_batch.shape[0], 4)
+        # Release the .npz file handle so the temp directory can be removed on Windows
+        del ds
+        client_model.close()
 
     def test_nan_inf_data_handling(self):
         client_model = Model(self.npz_path_nan, batch_size=4)

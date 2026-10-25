@@ -156,7 +156,10 @@ done
 # Step B: Run Frozen Selector with Meta-Aggregator & 7 Fixed Aggregators across 30 Seeds
 for seed in $(seq 42 71); do
   # 1. Dynamic Meta-Aggregator + Frozen Selector
-  conda run -n web python simulate_fl.py --data-dir data/iid -n 100 -r $T --seed $seed -s hierarchical --load-selector results/h3_saved_selectors/selector_s${seed}.npz --freeze-selector -o results/h3_meta/s${seed}
+  #    'unconditioned' uses the same 7 client features as the saved LinUCB selector, which is loaded into its
+  #    client level; --freeze-client-selector freezes only that level so the meta-aggregator keeps learning.
+  #    (--freeze-selector would also freeze the meta-aggregator, and '-s hierarchical' cannot load a LinUCB file.)
+  conda run -n web python simulate_fl.py --data-dir data/iid -n 100 -r $T --seed $seed -s unconditioned --load-selector results/h3_saved_selectors/selector_s${seed}.npz --freeze-client-selector -o results/h3_meta/s${seed}
 
   # 2-8. Fixed Aggregators + Frozen Selector
   for agg in fedavg fedprox scaffold krum fedadam fedfv qfedavg; do
