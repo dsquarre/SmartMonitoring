@@ -1,4 +1,0 @@
-# Calibration step 4: server-training step (train, FedAvg base, record, lr 0.1, eta 0.01)
---rounds 40 --seeds 1,2 --strategy train --normalize record --lr 0.1 --server-lr 0.01 --out results/ecg/calib/step4 --ft-lr-scale 1.0 --name ft1.0
---rounds 40 --seeds 1,2 --strategy train --normalize record --lr 0.1 --server-lr 0.01 --out results/ecg/calib/step4 --ft-lr-scale 0.1 --name ft0.1
---rounds 40 --seeds 1,2 --strategy train --normalize record --lr 0.1 --server-lr 0.01 --out results/ecg/calib/step4 --ft-lr-scale 0.01 --name ft0.01

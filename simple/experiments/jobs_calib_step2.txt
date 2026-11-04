@@ -1,5 +1,0 @@
-# Calibration step 2: client lr (static FedAvg, record normalisation)
---rounds 40 --seeds 1,2 --strategy fedavg --normalize record --out results/ecg/calib/step2 --lr 0.01 --name lr0.01
---rounds 40 --seeds 1,2 --strategy fedavg --normalize record --out results/ecg/calib/step2 --lr 0.03 --name lr0.03
-# reused from step 1 (identical config): --rounds 40 --seeds 1,2 --strategy fedavg --normalize record --out results/ecg/calib/step2 --lr 0.05 --name lr0.05
---rounds 40 --seeds 1,2 --strategy fedavg --normalize record --out results/ecg/calib/step2 --lr 0.1 --name lr0.1

@@ -21,8 +21,8 @@ the FedStrategist attacks. See [distributed/README.md](distributed/README.md#plu
 ## Quick start
 
 ```bash
-# simple: one run of the method on the non-IID partitions
-cd simple && python run.py --strategy select_train --seeds 42 --rounds 100
+# simple: one seed of the method on the non-IID partitions (hypotheses and commands: simple/EXPERIMENTS.md)
+cd simple && python simulate_fl.py -a select_train --seed 42 -o results/test
 
 # distributed: whole stack in Docker (Redis, LocalStack as S3, server, Celery, 4 clients); see distributed/README.md
 cd distributed && python scripts/make_server_val.py && docker compose up --build

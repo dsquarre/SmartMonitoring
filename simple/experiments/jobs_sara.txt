@@ -1,3 +1,0 @@
-# Amendment (ecg_protocol.md section 4): SARA in P3a and P3b
---rounds 60 --seeds 42-46 --normalize record --lr 0.1 --server-lr 0.01 --ft-lr-scale 1.0 --num-malicious 20 --attack standard --out results/ecg/poison_standard --strategy sara
---rounds 60 --seeds 42-46 --normalize record --lr 0.1 --server-lr 0.01 --ft-lr-scale 1.0 --num-malicious 20 --attack standard --flip --out results/ecg/poison_flip --strategy sara

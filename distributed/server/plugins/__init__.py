@@ -1,7 +1,7 @@
 """SmartMonitoring plugins: client selectors, server rules, server controllers and client behaviours.
 
 Shared by the distributed system (server/selector.py, server/aggregator.py) and the simple simulator
-(simple/smartmon/simulation.py), so a method behaves the same in both. See base.py for the interfaces.
+(simple/simulate_fl.py), so a method behaves the same in both. See base.py for the interfaces.
 
     from plugins import build_controller, get_selector_by_name
     controller = build_controller("select_train", rule_args={"fedyogi": {"eta": 0.01}})

@@ -1,3 +1,0 @@
-# Calibration step 1: preprocessing (static FedAvg, lr 0.05)
---rounds 40 --seeds 1,2 --strategy fedavg --lr 0.05 --normalize none --name none --out results/ecg/calib/step1
---rounds 40 --seeds 1,2 --strategy fedavg --lr 0.05 --normalize record --name record --out results/ecg/calib/step1
