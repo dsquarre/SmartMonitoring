@@ -11,7 +11,16 @@ __pycache__
 *_debug_log.txt
 *.rdb
 tmp_s3_bucket/
-server/tmp_round_*/
+tmp_round_*/
+tmp_init/
+*.ckpt.pkl
+*.ckpt.pkl.tmp
+global_metrics.txt
+distributed/client/models/
+distributed/client/metrics/
+distributed/client/run_logs/
+distributed/server/uploads/
+distributed/server/models/
 certs/
 *.key
 *.crt
@@ -19,6 +28,11 @@ fl.yaml
 *.zip
 results/
 .venv/
-dashboard/node_modules
+distributed/dashboard/node_modules
 datasets/
 run/
+*.bat
+.ipynb_checkpoints
+.agents
+# experiment job-runner logs
+simple/experiments/*_logs/

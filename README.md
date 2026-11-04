@@ -1,90 +1,45 @@
-# Federated Learning System for Healthcare 
-Sponsored by AWS Amazon
+# SmartMonitoring
 
-## Client Side 
+Federated learning for atrial-fibrillation detection from 12-lead ECGs (PTB-XL), with:
+- **Oort** client selection;
+- a server that **selects, then trains**. Each round it builds the FedAvg and FedYogi aggregates from the same client
+  updates, keeps the one with the lower loss on its own validation data, then trains that model on the same data.
 
-- Clients ping server with a password to get client id.
-- Each client opens a websocket at ws/ip:8000/ws/client_id and recieves commands from server to either "train" or "wait" or "stop". 
-- Each client that recieves train downloads global model, start training, upload file to server other clients wait
-- To preserve RAM client.py runs multiple sequential clients that train and evaluate one by one instead of parallely.
-- Then each client gets pinged to start evaluation and evaluate model on their local test data and upload metrics to server
-- Each client also makes a local & global metrics vs round plot to check convergence
+Every method is a plugin (client selector, server rule, server controller, client attack) in
+`distributed/server/plugins`. One system runs them all, so methods can be compared by changing a name. The
+repository has two hosts for the same plugins:
 
+| Folder | What it is | Use it to |
+|---|---|---|
+| [`simple/`](simple) | A single-process simulation: the ECG model, data split, device profiles, a runner and a comparison script | Run the papers' experiments (many seeds, GPU) |
+| [`distributed/`](distributed) | The original deployable system (FastAPI coordinator, Redis, Celery worker, S3, WebSocket clients, React dashboard, AWS CloudFormation, Docker), with the RL code replaced by the plugins | Run real clients on separate machines or containers |
 
-## Server Side
+Plugins: Oort and random selection; FedAvg, FedYogi, coordinate-wise median and Krum; the controllers `select` (the
+TMLR supplement's greedy-val), `train` (server-ft), `select_train` (ours), `train_select` and `fedstrategist`; and
+the FedStrategist attacks. See [distributed/README.md](distributed/README.md#plugins).
 
-- Generates a random id for each user on recieving password
-- Allows only authenticated users to start websocket
-- Once N clients have started socket, start fd round. 
-- For now, all clients recieve "train" command
-- Applies simple FedAvg algorithm to update global model and pings each client when done
-- When all clients have uploaded evaluation metrics, again apply FedAvg on metrics to get global metrics and start next round till all rounds are done
-
-## FL.YAML
-
-- A template file for CloudFormation stack created in AWS
-- 1 Server and 2 client instances (which run multiple sequential and parallel clients)
-- Almost everything is automated, just scp the dataset into each client instance
-- then ssh inside each instance to run main.py
-- Make sure the "ssh key" is replaced by actual ssh key obtained from terminal after doing 
-```bash
-ssh-keygen -t rsa -b 2048
-```
-- and replacing it with your key to be able to ssh into the ec2 instance
-- The shell commands in UserData take roughly 5 minutes to execute
-- After 5 min, ssh into server and replace the ps.dat with actual hashed password you want to use, and ssh into clients to start the federated learning system
-
-
-## How to Add and Configure a New Client
-
-To add a new client (e.g. `client_11`) to the Federated Learning system:
-
-### 1. Register Credentials on the Server
-Generate the SHA256 hash of the client's desired password:
-```bash
-python -c "import hashlib; print(hashlib.sha256(b'YOUR_PASSWORD').hexdigest())"
-```
-Add the client ID and hash to [server/credentials.json](file:///home/danish/SmartMonitoring/server/credentials.json):
-```json
-{
-  "client_0": "8b841ea...",
-  "client_11": "your_generated_sha256_hash_here"
-}
-```
----
-
-## How to Use
-
-### Client
-* **Parameters**:
-  - `-d, --dataset`: (Required) Path to the `.npz` local dataset file.
-  - `-s, --server-ip`: Server IP or URL (e.g. `127.0.0.1:8000` or `https://my-fl-server.com`).
-  - `-p, --password`: Password configured for the client ID.
-  - `-c, --client-id`: The unique client ID registered in `credentials.json` (Defaults to `client_0`).
-  - `-f, --fingerprint`: Expected SHA-256 SSL certificate fingerprint for certificate pinning.
-  - `--no-verify` / `--insecure`: Bypass SSL certificate checks (useful for testing self-signed SSL/TLS setups).
+## Quick start
 
 ```bash
-# Example running client locally
-pip install -r client/requirements.txt
-python client/main.py -d data/iid/client_0.npz -s localhost:8000 -p 'P7h1!quiBO0no96' -c client_0 --no-verify
+# simple: one run of the method on the non-IID partitions
+cd simple && python run.py --strategy select_train --seeds 42 --rounds 100
+
+# distributed: whole stack in Docker (Redis, LocalStack as S3, server, Celery, 4 clients); see distributed/README.md
+cd distributed && python scripts/make_server_val.py && docker compose up --build
 ```
 
-### Server
-* Ensure your hashed client credentials are set in [server/credentials.json](file:///home/danish/SmartMonitoring/server/credentials.json).
-* **Parameters**:
-  - `-s, --selector`: Client selection strategy (`random` [default], `linucb`, `dqn`, `hierarchical`).
-  - `-a, --aggregator`: Model aggregation strategy (`fedavg` [default], `qfedavg`, `fedfv`, `fedadam`, `fedprox`, `krum`, `scaffold`).
-  - `-n, --clients`: Total client count threshold required before coordinator starts (default: `3`).
-  - `-k, --select-k`: Number of clients selected per training round (default: `3`).
-  - `-r, --rounds`: Total number of FL training rounds (default: `5`).
-  - `--host`: Server listen host IP (default: `0.0.0.0`).
-  - `--port`: Server listen port (default: `8000`).
+## Data
 
-```bash
-# Example running server locally
-pip install -r server/requirements.txt
-cd server
-python main.py -s random -a fedavg -n 10 -k 3 -r 20
-```
+`datasets/` is not tracked by git. It holds `iid/` and `non_iid/` folders, each with 100 `client_<i>.npz`
+partitions of PTB-XL (`X_train`, `y_train`, `X_test`, `y_test`; X has shape (n, 1000, 12) and y is AFib or not).
 
+## Background
+
+The method builds on the TMLR supplement (`tmlr_supplement.zip`, not tracked):
+- Its Oort port is reused unchanged.
+- Its "greedy-val" selector (FedAvg vs FedYogi chosen by validation loss) and its "server-ft" baseline (training on
+  the server's validation set) are the two parts that `select_train` combines.
+
+The earlier hierarchical-RL selector and its experiments were removed. Archives:
+- `archive_rl_experiments_2026-10-30.zip`: the last working tree, including uncommitted work.
+- The `experiments-v2-v3` and `paper-final-v1` branches.

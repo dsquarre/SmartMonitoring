@@ -1,0 +1,4 @@
+# Calibration step 3: FedYogi eta (static FedYogi, record, lr 0.1)
+--rounds 40 --seeds 1,2 --strategy fedyogi --normalize record --lr 0.1 --out results/ecg/calib/step3 --server-lr 0.01 --name eta0.01
+--rounds 40 --seeds 1,2 --strategy fedyogi --normalize record --lr 0.1 --out results/ecg/calib/step3 --server-lr 0.003 --name eta0.003
+--rounds 40 --seeds 1,2 --strategy fedyogi --normalize record --lr 0.1 --out results/ecg/calib/step3 --server-lr 0.03 --name eta0.03

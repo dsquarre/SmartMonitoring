@@ -1,0 +1,120 @@
+# Local test stack for the distributed system, using the unchanged server/ and client/ Dockerfiles.
+# LocalStack stands in for AWS S3, so the real (non-mock) S3 code path runs: boto3 uploads/downloads and
+# presigned URLs that the client containers fetch directly.
+#
+#   python scripts/make_server_val.py --src ../datasets/non_iid --clients 90-99 --out server/server_val.npz
+#   docker compose up --build                       # Redis, LocalStack S3, server, Celery worker, 4 clients
+#   docker compose --profile tests run --rm tests   # pytest suite against the live Redis / S3 / Celery
+#   docker compose down -v
+#
+# Dashboard: http://localhost:8000/   (settings below: FL_N=4, FL_K=3, FL_ROUNDS=3, select_train + Oort)
+
+x-server-env: &server-env
+  REDIS_URL: redis://redis:6379/0
+  S3_MOCK: "false"
+  S3_BUCKET: fl-model-storage
+  S3_ENDPOINT_URL: http://s3:4566
+  AWS_REGION: us-east-1
+  AWS_ACCESS_KEY_ID: test
+  AWS_SECRET_ACCESS_KEY: test
+  SERVER_HOST: http://server:8000
+  FL_N: "4"                     # one per client service below
+  FL_K: "3"
+  FL_ROUNDS: "3"
+  FL_AGGREGATOR: select_train
+  FL_SELECTOR: oort
+  SERVER_VAL_PATH: /data/server_val.npz
+  TF_CPP_MIN_LOG_LEVEL: "2"
+
+x-client: &client
+  build: ./client
+  image: smartmonitoring-client
+  depends_on:
+    server:
+      condition: service_healthy
+  volumes:
+    - ../datasets/non_iid:/data/non_iid:ro
+  environment:
+    PASSWORD: P7h1!quiBO0no96
+    SERVER_IP: server:8000
+
+services:
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      retries: 30
+
+  s3:                  # LocalStack S3 (AWS S3 API, presigned URLs)
+    image: localstack/localstack:3.8
+    environment:
+      SERVICES: s3
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:4566/_localstack/health"]
+      interval: 2s
+      retries: 60
+
+  s3-init:             # the bucket that CloudFormation creates on AWS
+    image: smartmonitoring-server
+    environment: *server-env
+    depends_on:
+      s3:
+        condition: service_healthy
+    command: ["python", "-c", "import s3_helper; s3_helper.s3_client.create_bucket(Bucket=s3_helper.S3_BUCKET); print('bucket ready')"]
+
+  server:
+    build: ./server
+    image: smartmonitoring-server
+    environment: *server-env
+    ports: ["8000:8000"]
+    volumes:
+      - ./server/server_val.npz:/data/server_val.npz:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+      s3-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/api/status"]
+      interval: 3s
+      retries: 60
+
+  celery:
+    image: smartmonitoring-server
+    command: ["celery", "-A", "celery_app.celery_app", "worker", "--loglevel=info", "--concurrency=1"]
+    environment: *server-env
+    volumes:
+      - ./server/server_val.npz:/data/server_val.npz:ro
+    depends_on:
+      server:
+        condition: service_healthy
+
+  client_0:
+    <<: *client
+    command: ["-d", "/data/non_iid/client_0.npz", "-c", "client_0"]
+  client_1:
+    <<: *client
+    command: ["-d", "/data/non_iid/client_1.npz", "-c", "client_1"]
+  client_2:
+    <<: *client
+    command: ["-d", "/data/non_iid/client_2.npz", "-c", "client_2"]
+  client_3:
+    <<: *client
+    command: ["-d", "/data/non_iid/client_3.npz", "-c", "client_3"]
+
+  tests:               # docker compose run --rm tests
+    image: smartmonitoring-server
+    profiles: ["tests"]
+    environment: *server-env
+    working_dir: /work/distributed
+    volumes:
+      - .:/work/distributed
+      - ../simple:/work/simple:ro
+      - ../datasets/iid:/work/distributed/data/iid:ro    # tests/test_client_model.py real-data test
+    entrypoint: ["/bin/sh", "-c", "pip install -q pytest httpx scikit-learn && python -m pytest -q tests"]
+    depends_on:
+      redis:
+        condition: service_healthy
+      s3-init:
+        condition: service_completed_successfully

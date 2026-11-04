@@ -1,0 +1,39 @@
+# ECG tests (ecg_protocol.md section 2). Calibrated: record normalisation, client lr 0.1, FedYogi eta 0.01,
+# server-training step 1.0 x client lr. Test seeds 42-46, 60 rounds.
+# P1a + P2a: full matched V
+--rounds 60 --seeds 42-46 --normalize record --lr 0.1 --server-lr 0.01 --ft-lr-scale 1.0 --strategy fedavg --out results/ecg/main
+--rounds 60 --seeds 42-46 --normalize record --lr 0.1 --server-lr 0.01 --ft-lr-scale 1.0 --strategy fedyogi --out results/ecg/main
+--rounds 60 --seeds 42-46 --normalize record --lr 0.1 --server-lr 0.01 --ft-lr-scale 1.0 --strategy select --out results/ecg/main
+--rounds 60 --seeds 42-46 --normalize record --lr 0.1 --server-lr 0.01 --ft-lr-scale 1.0 --strategy train --out results/ecg/main
+--rounds 60 --seeds 42-46 --normalize record --lr 0.1 --server-lr 0.01 --ft-lr-scale 1.0 --strategy select_train --out results/ecg/main
+--rounds 60 --seeds 42-46 --normalize record --lr 0.1 --server-lr 0.01 --ft-lr-scale 1.0 --strategy train_select --select-frac 0.2 --out results/ecg/main
+# P1b: mechanism controls (FedYogi candidate replaced)
+--rounds 60 --seeds 42-46 --normalize record --lr 0.1 --server-lr 0.01 --ft-lr-scale 1.0 --strategy select --rules fedavg,reject --name c_reject --out results/ecg/main
+--rounds 60 --seeds 42-46 --normalize record --lr 0.1 --server-lr 0.01 --ft-lr-scale 1.0 --strategy select --rules fedavg,half --name c_half --out results/ecg/main
+--rounds 60 --seeds 42-46 --normalize record --lr 0.1 --server-lr 0.01 --ft-lr-scale 1.0 --strategy select --rules fedavg,normmatch --name c_normmatch --out results/ecg/main
+# P2b: |V| = 280, matched
+--rounds 60 --seeds 42-46 --normalize record --lr 0.1 --server-lr 0.01 --ft-lr-scale 1.0 --strategy select --val-size 280 --out results/ecg/v280
+--rounds 60 --seeds 42-46 --normalize record --lr 0.1 --server-lr 0.01 --ft-lr-scale 1.0 --strategy train --val-size 280 --out results/ecg/v280
+--rounds 60 --seeds 42-46 --normalize record --lr 0.1 --server-lr 0.01 --ft-lr-scale 1.0 --strategy select_train --val-size 280 --out results/ecg/v280
+--rounds 60 --seeds 42-46 --normalize record --lr 0.1 --server-lr 0.01 --ft-lr-scale 1.0 --strategy train_select --select-frac 0.2 --val-size 280 --out results/ecg/v280
+# P2c: |V| = 280 at 50% AFib (label-skewed server set)
+--rounds 60 --seeds 42-46 --normalize record --lr 0.1 --server-lr 0.01 --ft-lr-scale 1.0 --strategy select --val-size 280 --val-pos-share 0.5 --out results/ecg/v280_afib50
+--rounds 60 --seeds 42-46 --normalize record --lr 0.1 --server-lr 0.01 --ft-lr-scale 1.0 --strategy train --val-size 280 --val-pos-share 0.5 --out results/ecg/v280_afib50
+--rounds 60 --seeds 42-46 --normalize record --lr 0.1 --server-lr 0.01 --ft-lr-scale 1.0 --strategy select_train --val-size 280 --val-pos-share 0.5 --out results/ecg/v280_afib50
+--rounds 60 --seeds 42-46 --normalize record --lr 0.1 --server-lr 0.01 --ft-lr-scale 1.0 --strategy train_select --select-frac 0.2 --val-size 280 --val-pos-share 0.5 --out results/ecg/v280_afib50
+# P3a: 20 malicious clients, standard attack
+--rounds 60 --seeds 42-46 --normalize record --lr 0.1 --server-lr 0.01 --ft-lr-scale 1.0 --num-malicious 20 --attack standard  --out results/ecg/poison_standard --strategy fedavg
+--rounds 60 --seeds 42-46 --normalize record --lr 0.1 --server-lr 0.01 --ft-lr-scale 1.0 --num-malicious 20 --attack standard  --out results/ecg/poison_standard --strategy median
+--rounds 60 --seeds 42-46 --normalize record --lr 0.1 --server-lr 0.01 --ft-lr-scale 1.0 --num-malicious 20 --attack standard  --out results/ecg/poison_standard --strategy krum
+--rounds 60 --seeds 42-46 --normalize record --lr 0.1 --server-lr 0.01 --ft-lr-scale 1.0 --num-malicious 20 --attack standard  --out results/ecg/poison_standard --strategy fedstrategist --controller-args '{"preset":"paper"}' --name fs_paper
+--rounds 60 --seeds 42-46 --normalize record --lr 0.1 --server-lr 0.01 --ft-lr-scale 1.0 --num-malicious 20 --attack standard  --out results/ecg/poison_standard --strategy fedstrategist --controller-args '{"preset":"authors"}' --name fs_authors
+--rounds 60 --seeds 42-46 --normalize record --lr 0.1 --server-lr 0.01 --ft-lr-scale 1.0 --num-malicious 20 --attack standard  --out results/ecg/poison_standard --strategy fedstrategist --controller-args '{"preset":"paper","reward_metric":"loss"}' --name fs_paper_loss
+--rounds 60 --seeds 42-46 --normalize record --lr 0.1 --server-lr 0.01 --ft-lr-scale 1.0 --num-malicious 20 --attack standard  --out results/ecg/poison_standard --strategy select --rules fedavg,median,krum --name select_robust
+# P3b: 20 malicious clients, standard attack, direction flipped
+--rounds 60 --seeds 42-46 --normalize record --lr 0.1 --server-lr 0.01 --ft-lr-scale 1.0 --num-malicious 20 --attack standard --flip --out results/ecg/poison_flip --strategy fedavg
+--rounds 60 --seeds 42-46 --normalize record --lr 0.1 --server-lr 0.01 --ft-lr-scale 1.0 --num-malicious 20 --attack standard --flip --out results/ecg/poison_flip --strategy median
+--rounds 60 --seeds 42-46 --normalize record --lr 0.1 --server-lr 0.01 --ft-lr-scale 1.0 --num-malicious 20 --attack standard --flip --out results/ecg/poison_flip --strategy krum
+--rounds 60 --seeds 42-46 --normalize record --lr 0.1 --server-lr 0.01 --ft-lr-scale 1.0 --num-malicious 20 --attack standard --flip --out results/ecg/poison_flip --strategy fedstrategist --controller-args '{"preset":"paper"}' --name fs_paper
+--rounds 60 --seeds 42-46 --normalize record --lr 0.1 --server-lr 0.01 --ft-lr-scale 1.0 --num-malicious 20 --attack standard --flip --out results/ecg/poison_flip --strategy fedstrategist --controller-args '{"preset":"authors"}' --name fs_authors
+--rounds 60 --seeds 42-46 --normalize record --lr 0.1 --server-lr 0.01 --ft-lr-scale 1.0 --num-malicious 20 --attack standard --flip --out results/ecg/poison_flip --strategy fedstrategist --controller-args '{"preset":"paper","reward_metric":"loss"}' --name fs_paper_loss
+--rounds 60 --seeds 42-46 --normalize record --lr 0.1 --server-lr 0.01 --ft-lr-scale 1.0 --num-malicious 20 --attack standard --flip --out results/ecg/poison_flip --strategy select --rules fedavg,median,krum --name select_robust

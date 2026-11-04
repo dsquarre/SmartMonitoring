@@ -1,0 +1,10 @@
+__pycache__/
+models/
+uploads/
+tmp_s3_bucket/
+tmp_round_*/
+upload_log.csv
+global_metrics.txt
+*.png
+server_val.npz
+.env

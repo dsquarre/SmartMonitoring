@@ -1,0 +1,2 @@
+# P1c: random_mix with p = selector's mean FedYogi rate in P1a (0.357, from analyze_ecg.py --p1c-rate)
+--rounds 60 --seeds 42-46 --normalize record --lr 0.1 --server-lr 0.01 --ft-lr-scale 1.0 --strategy random_mix --controller-args '{"p": 0.357}' --out results/ecg/main
