@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Poisoning Simulation</title>
+<meta name="description" content="How the ecg-plugins-oort-sara branch simulates malicious clients: attack vectors, where they run, the server defenses and learned controllers that face them, and what is not covered.">
+<style>
+:root {
+  --bg: #fbfaf7;
+  --surface: #ffffff;
+  --surface-2: #f2f0ea;
+  --text: #1d1f23;
+  --muted: #5d6169;
+  --border: #dedad0;
+  --accent: #1f5f8b;
+  --attack: #b3261e;
+  --honest: #7a7f88;
+  --stealth: #a15c00;
+  --ok: #2e6b3a;
+  --warn-bg: #fff4e0;
+  --warn-border: #e5b768;
+  --code-bg: #f2f0ea;
+  --mono: ui-monospace, "Cascadia Code", Consolas, "SFMono-Regular", Menlo, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #15171b;
+    --surface: #1c1f24;
+    --surface-2: #23272d;
+    --text: #e7e8ea;
+    --muted: #a3a8b1;
+    --border: #343a42;
+    --accent: #7db7e0;
+    --attack: #f08a80;
+    --honest: #9aa0a8;
+    --stealth: #e8b04a;
+    --ok: #86c995;
+    --warn-bg: #2b2416;
+    --warn-border: #7a6030;
+    --code-bg: #23272d;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #15171b;
+  --surface: #1c1f24;
+  --surface-2: #23272d;
+  --text: #e7e8ea;
+  --muted: #a3a8b1;
+  --border: #343a42;
+  --accent: #7db7e0;
+  --attack: #f08a80;
+  --honest: #9aa0a8;
+  --stealth: #e8b04a;
+  --ok: #86c995;
+  --warn-bg: #2b2416;
+  --warn-border: #7a6030;
+  --code-bg: #23272d;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.6 var(--sans);
+}
+main { max-width: 920px; margin: 0 auto; padding: 40px 16px 80px; }
+header { border-bottom: 1px solid var(--border); padding-bottom: 20px; margin-bottom: 8px; }
+.kicker { font: 600 13px/1.4 var(--sans); letter-spacing: .06em; text-transform: uppercase; color: var(--accent); margin: 0 0 6px; }
+h1 { font-size: 32px; line-height: 1.2; margin: 0 0 10px; }
+h2 { font-size: 22px; line-height: 1.3; margin: 44px 0 12px; }
+h3 { font-size: 17px; margin: 26px 0 8px; }
+p, li { max-width: 72ch; }
+.lede { font-size: 18px; color: var(--muted); margin: 0; }
+a { color: var(--accent); }
+code { font-family: var(--mono); font-size: .88em; background: var(--code-bg); padding: 1px 5px; border-radius: 4px; overflow-wrap: anywhere; }
+pre { font-family: var(--mono); font-size: 13.5px; line-height: 1.5; background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; overflow-x: auto; margin: 10px 0 16px; }
+pre code { background: none; padding: 0; font-size: inherit; overflow-wrap: normal; }
+.table-wrap { overflow-x: auto; margin: 10px 0 18px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: 14.5px; }
+th, td { text-align: left; vertical-align: top; padding: 9px 12px; border-bottom: 1px solid var(--border); }
+th { background: var(--surface-2); font-weight: 600; white-space: nowrap; }
+tr:last-child td { border-bottom: none; }
+td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin: 22px 0 0; }
+.fact { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }
+.fact b { display: block; font-size: 22px; line-height: 1.2; }
+.fact span { color: var(--muted); font-size: 14px; }
+figure { margin: 16px 0 22px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
+figure svg { width: 100%; height: auto; display: block; }
+figcaption { color: var(--muted); font-size: 14px; margin-top: 8px; }
+.flow { display: flex; flex-wrap: wrap; align-items: stretch; gap: 8px; margin: 14px 0 6px; }
+.step { flex: 1 1 150px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; font-size: 14px; }
+.step b { display: block; font-size: 13px; color: var(--muted); font-weight: 600; margin-bottom: 2px; }
+.step.bad { border-color: var(--attack); }
+.step.bad b { color: var(--attack); }
+.note { background: var(--warn-bg); border: 1px solid var(--warn-border); border-radius: 8px; padding: 12px 14px; margin: 14px 0; }
+.note p { margin: 0; }
+.tag { display: inline-block; font-size: 12px; font-weight: 600; border-radius: 999px; padding: 1px 8px; border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
+.tag.new { color: var(--ok); border-color: var(--ok); }
+.tag.sim { color: var(--stealth); border-color: var(--stealth); }
+.tag.no { color: var(--attack); border-color: var(--attack); }
+ul.tight li { margin: 4px 0; }
+footer { margin-top: 56px; padding-top: 16px; border-top: 1px solid var(--border); color: var(--muted); font-size: 14px; }
+@media (max-width: 560px) {
+  h1 { font-size: 26px; }
+  h2 { font-size: 20px; }
+  main { padding-top: 28px; }
+}
+</style>
+</head>
+<body>
+<main>
+
+<header>
+  <p class="kicker">Branch ecg-plugins-oort-sara · Paper 3 groundwork</p>
+  <h1>Simulating untrustworthy clients</h1>
+  <p class="lede">This branch adds model-poisoning clients to both the simulator (<code>simple/simulate_fl.py</code>) and the deployed system (<code>distributed/</code>). It also adds the server-side rules and learned controllers that have to cope with them. This page lists what each attack does, where it runs, which defenses face it, and what is not simulated.</p>
+  <div class="facts">
+    <div class="fact"><b>3 attack types</b><span>standard (×5), stealth (norm-matched), flip (reverse direction)</span></div>
+    <div class="fact"><b>On/off schedule</b><span>attackers can be active only in chosen rounds</span></div>
+    <div class="fact"><b>One attack module</b><span><code>attacks.py</code>, byte-identical on server and client</span></div>
+    <div class="fact"><b>4 hypotheses</b><span>H12–H15 written and runnable; not yet run</span></div>
+  </div>
+</header>
+
+<h2>Threat model</h2>
+<ul class="tight">
+  <li><strong>Who:</strong> a fixed set of <code>--num-malicious</code> clients, drawn once per seed from all clients (seed stream <code>0xBAD</code>), so every method sees the same attackers for a given seed. The default experiment uses 20 of 100.</li>
+  <li><strong>What they control:</strong> only the weights they upload. Each malicious client trains honestly on its own data, then rewrites its update before uploading it. Its data and labels are not poisoned.</li>
+  <li><strong>When:</strong> only in rounds where the client selector picks them, and only in rounds listed in <code>--attack-rounds</code>. By default they attack in every round.</li>
+  <li><strong>What the server has:</strong> a clean validation set V (half of the pooled test records per seed). It never sees which clients are malicious, with one exception for Krum (see below). The test set T is reported only and is never used for any decision.</li>
+</ul>
+
+<div class="flow" aria-label="One round with poisoning">
+  <div class="step"><b>1 · select</b>Oort or random picks K = 20 clients</div>
+  <div class="step"><b>2 · train</b>every selected client runs E = 5 epochs of plain SGD honestly</div>
+  <div class="step bad"><b>3 · attack</b>malicious clients rewrite Δ = w<sub>local</sub> − w<sub>t</sub> before upload</div>
+  <div class="step"><b>4 · server</b>the controller applies one or more rules, possibly scoring them on V</div>
+  <div class="step"><b>5 · report</b>metrics of w<sub>t+1</sub> on T, and <code>n_malicious</code> for the round</div>
+</div>
+
+<h2>Attack vectors</h2>
+<p>Every attack has the same form. The client uploads <code>w<sub>t</sub> + s·Δ</code>, where Δ is its honest update and <code>s</code> sets the direction and norm:</p>
+
+<figure>
+  <svg viewBox="0 0 800 210" role="img" aria-label="Honest update and the four attack variants drawn as vectors from the current global model">
+    <defs>
+      <marker id="ah-honest" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill: var(--honest)"/></marker>
+      <marker id="ah-attack" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill: var(--attack)"/></marker>
+      <marker id="ah-stealth" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill: var(--stealth)"/></marker>
+    </defs>
+    <g style="font-family: var(--sans); font-size: 13px;">
+      <!-- panel 1: honest -->
+      <g transform="translate(0,0)">
+        <text x="100" y="24" text-anchor="middle" style="fill: var(--text); font-weight: 600;">honest (none)</text>
+        <line x1="60" y1="140" x2="108" y2="116" stroke-width="3" style="stroke: var(--honest)" marker-end="url(#ah-honest)"/>
+        <circle cx="60" cy="140" r="4" style="fill: var(--text)"/>
+        <text x="60" y="162" text-anchor="middle" style="fill: var(--muted)">w_t</text>
+        <text x="100" y="192" text-anchor="middle" style="fill: var(--muted)">s = 1</text>
+      </g>
+      <!-- panel 2: standard x5 -->
+      <g transform="translate(200,0)">
+        <text x="100" y="24" text-anchor="middle" style="fill: var(--text); font-weight: 600;">standard ×5</text>
+        <line x1="30" y1="150" x2="54" y2="138" stroke-width="2" stroke-dasharray="4 3" style="stroke: var(--honest)"/>
+        <line x1="30" y1="150" x2="170" y2="80" stroke-width="3" style="stroke: var(--attack)" marker-end="url(#ah-attack)"/>
+        <circle cx="30" cy="150" r="4" style="fill: var(--text)"/>
+        <text x="30" y="172" text-anchor="middle" style="fill: var(--muted)">w_t</text>
+        <text x="100" y="192" text-anchor="middle" style="fill: var(--muted)">s = 5 (‑‑attack-scale)</text>
+      </g>
+      <!-- panel 3: stealth -->
+      <g transform="translate(400,0)">
+        <text x="100" y="24" text-anchor="middle" style="fill: var(--text); font-weight: 600;">stealth</text>
+        <line x1="60" y1="140" x2="84" y2="128" stroke-width="2" stroke-dasharray="4 3" style="stroke: var(--honest)"/>
+        <line x1="60" y1="140" x2="128" y2="106" stroke-width="3" style="stroke: var(--stealth)" marker-end="url(#ah-stealth)"/>
+        <circle cx="60" cy="140" r="4" style="fill: var(--text)"/>
+        <text x="60" y="162" text-anchor="middle" style="fill: var(--muted)">w_t</text>
+        <text x="100" y="192" text-anchor="middle" style="fill: var(--muted)">|s·Δ| = mean benign |Δ|</text>
+      </g>
+      <!-- panel 4: flip -->
+      <g transform="translate(600,0)">
+        <text x="100" y="24" text-anchor="middle" style="fill: var(--text); font-weight: 600;">flip</text>
+        <line x1="110" y1="110" x2="150" y2="90" stroke-width="2" stroke-dasharray="4 3" style="stroke: var(--honest)"/>
+        <line x1="110" y1="110" x2="62" y2="134" stroke-width="3" style="stroke: var(--attack)" marker-end="url(#ah-attack)"/>
+        <circle cx="110" cy="110" r="4" style="fill: var(--text)"/>
+        <text x="122" y="128" style="fill: var(--muted)">w_t</text>
+        <text x="100" y="192" text-anchor="middle" style="fill: var(--muted)">s = −1 (or −5 with standard)</text>
+      </g>
+    </g>
+  </svg>
+  <figcaption>Dashed grey: the client's honest update Δ. Coloured: what it uploads. The stealth norm can be larger or smaller than the client's own |Δ|, because it copies the round's mean benign norm.</figcaption>
+</figure>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Attack</th><th>Flag</th><th>Upload</th><th>What it tests</th><th>Runs in</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><strong>standard</strong></td>
+      <td><code>--attack standard</code></td>
+      <td><code>w<sub>t</sub> + 5·Δ</code> (scale from <code>--attack-scale</code>)</td>
+      <td>A "loud" outlier: right direction, too large. This is FedStrategist's attack (Haque et al. 2025, Sec. 4.3).</td>
+      <td><span class="tag new">simulator</span> <span class="tag new">deployed client</span></td>
+    </tr>
+    <tr>
+      <td><strong>stealth</strong></td>
+      <td><code>--attack stealth</code></td>
+      <td>Same direction as Δ, rescaled to the mean norm of the round's benign updates</td>
+      <td>An attacker that norm-based filters cannot tell apart from honest clients.</td>
+      <td><span class="tag sim">simulator only</span>, since it needs every other client's update</td>
+    </tr>
+    <tr>
+      <td><strong>flip</strong></td>
+      <td><code>--flip</code> (combines with either attack, or with <code>none</code>)</td>
+      <td><code>w<sub>t</sub> − Δ</code>, <code>w<sub>t</sub> − 5·Δ</code> or a reversed stealth update</td>
+      <td>Actual poisoning: the update pushes the model away from fitting the data. This is an extension; FedStrategist has no such attack.</td>
+      <td><span class="tag new">simulator</span> <span class="tag new">deployed client</span></td>
+    </tr>
+    <tr>
+      <td><strong>on/off schedule</strong></td>
+      <td><code>--attack-rounds 1-40,81-120</code></td>
+      <td>Malicious clients upload honestly outside the listed rounds</td>
+      <td>A non-stationary environment, as in SARA's setting. A learned controller has to notice the change.</td>
+      <td><span class="tag sim">simulator only</span></td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<p><strong>Trainable weights only.</strong> The attack rescales only the trainable weights. BatchNorm moving statistics stay honest, because scaling a variance delta can make the variance negative, and no aggregation rule is designed to defend against that. A test covers this (<code>test_standard_scales_trainable_delta_only</code>).</p>
+
+<h3>Running it</h3>
+<p>Simulator, with 20 of 100 clients attacking at 5× and reversed, active only in two windows:</p>
+<pre><code>cd simple
+python simulate_fl.py -a fedavg --num-malicious 20 --attack standard --flip \
+    --attack-rounds 1-40,81-120 -o results/demo_poison</code></pre>
+<p>Each round row in <code>metrics.csv</code> includes <code>n_malicious</code>, the number of attackers among that round's selected clients, and the console marks their lines <code>(malicious)</code>.</p>
+
+<p>Deployed system: the client takes <code>--attack</code> / <code>FL_ATTACK</code> (<code>none</code> or <code>standard</code>), <code>--attack-scale</code> / <code>FL_ATTACK_SCALE</code> and <code>--flip</code> / <code>FL_ATTACK_FLIP</code>. The server and the Celery worker take <code>FL_NUM_MALICIOUS</code>, which only sets Krum's <em>f</em>. To make <code>client_3</code> malicious, add an override file:</p>
+<pre><code># override.yml
+services:
+  server: { environment: { FL_AGGREGATOR: fedstrategist, FL_NUM_MALICIOUS: "1" } }
+  celery: { environment: { FL_AGGREGATOR: fedstrategist, FL_NUM_MALICIOUS: "1" } }
+  client_3: { environment: { FL_ATTACK: standard } }
+
+docker compose -f docker-compose.yml -f override.yml up</code></pre>
+
+<h2>What the server can do about it</h2>
+<p>Defenses are plugins in <code>distributed/server/plugins/</code>, and the simulator and the deployed server use the same code. A <em>rule</em> combines one round's updates into a candidate model. A <em>controller</em> decides which rule's candidate to keep each round.</p>
+
+<h3>Rules</h3>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Rule</th><th>How it combines updates</th><th>Against these attacks</th></tr></thead>
+  <tbody>
+    <tr><td><code>fedavg</code></td><td>Sample-size-weighted mean</td><td>No defense; the undefended baseline.</td></tr>
+    <tr><td><code>median</code></td><td>Coordinate-wise median (the lower middle value for an even count)</td><td>Ignores a minority of large or reversed coordinates.</td></tr>
+    <tr><td><code>krum</code></td><td>Keeps the one client model with the smallest sum of squared distances to its n − f − 2 nearest neighbours</td><td>Drops outliers. Falls back to FedAvg when n ≤ 2f + 2.</td></tr>
+    <tr><td><code>fedyogi</code></td><td>Adaptive server step on the FedAvg pseudo-gradient</td><td>Not robust; it is in the rule set for Papers 1 and 2.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3>Controllers and their arms</h3>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Controller</th><th>Arms or candidates (poisoning runs)</th><th>How it chooses</th><th>Models scored on V per round</th></tr></thead>
+  <tbody>
+    <tr><td><code>select</code> (Paper 1)</td><td class="num">3: fedavg, median, krum</td><td>No bandit; nothing about the choice carries over between rounds. Builds all three candidates, scores each on V and keeps the one with the lowest loss. This is the selector H12–H15 use.</td><td class="num">3</td></tr>
+    <tr><td><code>select_train</code> (Paper 2, the system default)</td><td class="num">3: fedavg, median, krum</td><td>Same choice as <code>select</code>, then the server trains the kept model on V: 1 epoch of SGD at the client learning rate (<code>--ft-epochs</code>, <code>--ft-lr-scale</code>). Without <code>--select-frac</code>, the same V is used for scoring and training. Not in the H12–H15 commands as written.</td><td class="num">3, plus 1 training pass</td></tr>
+    <tr><td><code>fedstrategist</code></td><td class="num">3: fedavg, median, krum</td><td>Contextual bandit: <code>paper</code> = LinUCB, <code>authors</code> = CountUCB. The context is 3 update diagnostics (variance of norms, mean cosine similarity, norm of the mean), plus a bias term in the <code>paper</code> preset. Reward = 100·Δaccuracy on V − 0.5·cost(rule), or the drop in loss with <code>--fs-reward loss</code>.</td><td class="num">1 (2 in round 1)</td></tr>
+    <tr><td><code>sara</code></td><td class="num">3: fedavg, median, krum</td><td>UCB1 with no context. Tries each arm once, then picks mean + c·√(2 ln t / n<sub>a</sub>). Reward = accuracy − loss on V. Reconstructed from the TMLR paper's description, since there is no public code.</td><td class="num">1</td></tr>
+  </tbody>
+</table>
+</div>
+<p>Pass <code>--rules</code> to change any controller's arm set; the number of arms is the number of rules given. The client selector is a separate learner: Oort treats each client as an arm (100 here) and picks 20 per round. It is trained independently of the server controller, so the system does not learn a joint client-and-rule choice.</p>
+
+<div class="note"><p><strong>Krum is given the true f in the simulator.</strong> The simulator sets Krum's <em>f</em> to the exact number of attackers among the selected clients that round, which no real server knows. This favours Krum. The deployed server uses the fixed <code>FL_NUM_MALICIOUS</code> instead. Pass <code>--rule-args '{"krum": {"num_malicious": 4}}'</code> to fix <em>f</em> in the simulator too.</p></div>
+
+<h2>Other trust mechanisms in the deployed system</h2>
+<p>These are not poisoning defenses: they stop outsiders, not authorised clients that misbehave. They were already on <code>main</code>.</p>
+<ul class="tight">
+  <li><strong>Client authentication:</strong> challenge-response. The server issues a random 32-byte challenge that expires after 5 minutes. The client answers with SHA-256(stored password hash + challenge), which the server checks in constant time. The session lasts 24 hours in Redis, and the WebSocket refuses clients without one.</li>
+  <li><strong>TLS certificate pinning:</strong> the client checks the server certificate's SHA-256 fingerprint (<code>--fingerprint</code>) to stop man-in-the-middle attacks.</li>
+</ul>
+
+<h2>Not covered</h2>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Gap</th><th>Status</th></tr></thead>
+  <tbody>
+    <tr><td>Backdoor attacks (a trigger pattern that flips predictions only when present)</td><td><span class="tag no">not implemented</span></td></tr>
+    <tr><td>Data poisoning such as label flipping (the attacker changes its training data, not its upload)</td><td><span class="tag no">not implemented</span></td></tr>
+    <tr><td>Adaptive attackers that know the defense, and colluding attackers that coordinate their uploads</td><td><span class="tag no">not implemented</span> Attackers act independently; stealth only matches the norm.</td></tr>
+    <tr><td>Lying to the client selector: in the deployed system a client reports its own Oort utility and could inflate it to be picked more often</td><td><span class="tag no">not simulated</span> In the simulator, utility comes from honest training.</td></tr>
+    <tr><td>Trimmed mean, Multi-Krum, FLTrust, Zeno</td><td><span class="tag no">not implemented</span> FLTrust and Zeno are needed for H17.</td></tr>
+    <tr><td>Stealth and on/off attacks on the deployed system</td><td><span class="tag sim">simulator only</span></td></tr>
+  </tbody>
+</table>
+</div>
+<div class="note"><p><strong>Removed from main:</strong> the MAD norm filter (<code>filter_poisoned_clients</code>), which dropped updates with norm z-score above 3 before FedAvg, was removed along with the old <code>server/aggregator.py</code>. FedAvg on this branch is undefended; robustness comes from choosing <code>median</code>, <code>krum</code> or a controller over them. Re-adding the filter as a rule plugin would make it comparable with the others.</p></div>
+
+<h2>Planned experiments (Paper 3)</h2>
+<p>The commands are in <code>simple/EXPERIMENTS.md</code>. All use 20 of 100 clients malicious, 30 seeds and 120 rounds, unless stated otherwise. None has been run yet.</p>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>#</th><th>Setting</th><th>Methods compared</th></tr></thead>
+  <tbody>
+    <tr><td>H12</td><td>standard ×5</td><td>Selector (fedavg, median, krum) against FedStrategist (paper, authors, loss reward), SARA, FedAvg, Median and Krum</td></tr>
+    <tr><td>H13</td><td>standard ×5 + flip</td><td>Same as H12</td></tr>
+    <tr><td>H14</td><td>standard, active in rounds 1–40 and 81–120</td><td>Selector, SARA, the three FedStrategist variants</td></tr>
+    <tr><td>H15</td><td>10, 30 or 40 attackers, and the stealth attack</td><td>Same as H12</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2>Tests</h2>
+<ul class="tight">
+  <li><code>distributed/tests/test_plugins.py</code>:
+    <ul class="tight">
+      <li>The standard attack scales only the trainable weights.</li>
+      <li>The stealth norm matches the benign mean, flip reverses the update, and stealth without a benign norm raises an error.</li>
+      <li><code>client/attacks.py</code> is byte-identical to the server copy.</li>
+      <li>Median takes the lower middle value; Krum drops an outlier and falls back to FedAvg.</li>
+      <li>Both FedStrategist presets run and persist state, and its reward is computed correctly.</li>
+      <li>SARA updates only the arm it applied.</li>
+    </ul>
+  </li>
+  <li><code>simple/tests/test_simulate_fl.py</code>: <code>test_poisoning_and_attack_rounds</code> checks that attackers are active only in the listed rounds (<code>n_malicious</code> = 0, then 3). Every controller runs end to end.</li>
+</ul>
+
+<footer>
+  Code: <code>distributed/server/plugins/attacks.py</code> (copied to <code>distributed/client/attacks.py</code>), <code>rules.py</code>, <code>controllers.py</code>, <code>bandits.py</code>; <code>simple/simulate_fl.py</code> (poisoning flags).
+</footer>
+
+</main>
+</body>
+</html>

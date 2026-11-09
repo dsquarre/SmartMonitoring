@@ -409,7 +409,10 @@ def run_simulation(args, seed, out_dir):
     rule_args = {"fedyogi": {"eta": args.server_lr}, "normmatch": {"eta": args.server_lr}}
     for k, v in args.rule_args.items():
         rule_args[k] = dict(rule_args.get(k, {}), **v)
-    controller = build_controller(args.aggregator, rules=rules, rule_args=rule_args, **args.controller_args)
+    controller_args = dict(args.controller_args)
+    if args.aggregator == "random_mix":
+        controller_args.setdefault("seed", seed)      # a fresh coin-flip schedule per seed, not one shared schedule
+    controller = build_controller(args.aggregator, rules=rules, rule_args=rule_args, **controller_args)
     attack_rounds = parse_rounds(args.attack_rounds)
 
     gpus = tf.config.list_physical_devices("GPU")

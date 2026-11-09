@@ -131,6 +131,13 @@ class TestSimulation(unittest.TestCase):
             sim.main(argv)
         self.assertEqual(log.getvalue().count("[Skip]"), 2)
 
+    def test_random_mix_draws_a_schedule_per_seed(self):
+        out = os.path.join(self.tmp.name, "mix")
+        quiet(sim.main, ["--data-dir", self.data_dir, "-k", "2", "-r", "12", "-e", "1", "--batch-size", "4",
+                         "-a", "random_mix", "--mix-p", "0.5", "--seeds", "1-3", "-o", out])
+        schedules = {tuple(pd.read_csv(os.path.join(out, f"s{s}", "metrics.csv"))["choice"]) for s in (1, 2, 3)}
+        self.assertGreater(len(schedules), 1)
+
     def test_poisoning_and_attack_rounds(self):
         out = os.path.join(self.tmp.name, "poison")
         quiet(sim.main, self.argv(out, "-a", "select", "--rules", "fedavg,median,krum", "--num-malicious", "6",

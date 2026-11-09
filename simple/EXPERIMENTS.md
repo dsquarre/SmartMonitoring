@@ -79,9 +79,18 @@ The first group is the method under test. It is compared, paired by seed, with e
 per-seed best of each `--best-of` list. Each row gives the mean improvement with a 95% CI, wins out of 30, a one-sided
 paired t-test, Wilcoxon, and the Holm-adjusted p across the rows of that call. A hypothesis is **supported** when its
 deciding row has Holm p < 0.05. `--test ni` tests "at least as good" (non-inferiority, margin 0.01 AUPRC-AUC).
-`--metric` defaults to `auprc_auc` (mean test AUPRC over all rounds); also `auprc_final`, `rounds_to_target`
-(`--target 0.70`), `f2_final`, `brier_final`, `energy_kj`, `latency_h`. Output: `summary.md`, `per_seed.csv`, and
-plots (AUPRC vs round with 95% bands, rules kept, per-seed metric).
+`--metric` defaults to `auprc_auc` (mean test AUPRC over all rounds); also `auprc_late`, `auprc_final`,
+`rounds_to_target` (`--target 0.70`), `f2_final`, `accuracy_final`, `loss_final`, `brier_final`, `energy_kj`,
+`latency_h`. `summary.md` also lists the first group against each comparator on every metric (descriptive, two-sided,
+uncorrected).
+
+Output files:
+- **Tables:** `summary.md`, `per_seed.csv`, `comparison_summary.csv` (mean and std per group), `hypothesis_test_results.csv` (every pair of groups × every metric) and `comparison_strategy_selection_distribution.csv`.
+- **Curves vs round** (mean with 95% band): AUPRC, loss, F2, accuracy, cumulative energy and cumulative latency.
+- **Costs:** a bar chart of energy, latency and server time.
+- **Pareto plots:** AUPRC-AUC and final F2 against energy, against latency, and against energy × latency, plus 3D plots.
+- **Rule selection:** server rule kept, as a frequency chart and as shares.
+- **Per seed:** box plots.
 
 ---
 
@@ -114,6 +123,18 @@ Supported when the selector beats all three controls.
 python simulate_fl.py -a random_mix --mix-p P -o results/h3_random_mix
 python compare_experiments.py --dirs results/h1_select results/h3_random_mix --labels Selector RandomMix -o results/hypothesis3
 ```
+
+#### Hypothesis 3b (follow-up): the mixing ratio matters, and the selector finds a good one without tuning
+Added after H3 was not supported (the selector did not beat random mixing at its own ratio, p = 0.324). Random
+mixing at other ratios should do worse than at the selector's ratio and worse than the selector.
+```bash
+python simulate_fl.py -a random_mix --mix-p 0.10 -o results/h3b_mix_p010
+python simulate_fl.py -a random_mix --mix-p 0.50 -o results/h3b_mix_p050
+python compare_experiments.py --dirs results/h1_select results/h3_random_mix results/h3b_mix_p010 results/h3b_mix_p050 --labels Selector Mix0.32 Mix0.10 Mix0.50 -o results/hypothesis3b
+python compare_experiments.py --dirs results/h3_random_mix results/h3b_mix_p010 results/h3b_mix_p050 --labels Mix0.32 Mix0.10 Mix0.50 -o results/hypothesis3b_ratio
+```
+Supported when the selector beats both Mix0.10 and Mix0.50 (`hypothesis3b`). `hypothesis3b_ratio` shows whether 0.32
+itself beats the other ratios.
 
 #### Hypothesis 4: the selector reaches AUPRC 0.70 in fewer rounds (no new runs)
 ```bash
