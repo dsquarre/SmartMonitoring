@@ -105,6 +105,7 @@ class TestSimulation(unittest.TestCase):
 
     def test_every_strategy_runs(self):
         expected = {"fedavg": {"fedavg"}, "fedyogi": {"fedyogi"}, "median": {"median"}, "krum": {"krum"},
+                    "fltrust": {"fltrust"},
                     "select": {"fedavg", "fedyogi"}, "train": {"fedavg"}, "select_train": {"fedavg", "fedyogi"},
                     "train_select": {"fedavg", "fedyogi", "fedavg+train", "fedyogi+train"},
                     "random_mix": {"fedavg", "fedyogi"}, "fedstrategist": {"fedavg", "median", "krum"},

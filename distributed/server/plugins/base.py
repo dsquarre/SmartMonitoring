@@ -90,6 +90,7 @@ class Rule:
     not its candidate is used), so stateful rules such as FedYogi never apply stale state; `propose` then returns the
     rule's candidate global model."""
     name = ""
+    finetunes_per_round = 0      # training passes on V that propose() itself makes (FLTrust's server update)
 
     def advance(self, ctx: RoundContext) -> None:
         pass

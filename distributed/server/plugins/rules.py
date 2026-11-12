@@ -11,13 +11,15 @@
     krum     Blanchard et al. 2017: the client model with the smallest sum of squared distances to its n - f - 2
              nearest neighbours; falls back to FedAvg when n <= 2f + 2 (as in the FedStrategist reproduction).
              f = the rule's `num_malicious`, else the round's RoundContext.num_malicious
+    fltrust  Cao et al., NDSS 2021: client updates weighted by their cosine agreement with the server's own update
+             on V and rescaled to its norm (needs the server validation set)
 
 The FedStrategist reference averages updates without sample weights; here every rule uses the system's sample-weighted
 FedAvg where it averages, so the rules differ only in what they are meant to differ in.
 """
 import numpy as np
 
-from .base import Registry, Rule, RoundContext, Weights
+from .base import Registry, Rule, RoundContext, Weights, update_norm
 
 RULES = Registry("server rule")
 
@@ -87,6 +89,48 @@ class Krum(Rule):
         scores = np.sort(dists, axis=1)[:, 1:k + 1].sum(axis=1)   # column 0 is the distance to itself
         self.last_pick = int(np.argmin(scores))
         return [a.copy() for a in ctx.updates[self.last_pick].weights]
+
+
+@RULES.register("fltrust")
+class FLTrust(Rule):
+    """FLTrust (Cao et al., NDSS 2021). The server trains the current global model on its own clean data (the host's
+    `finetune` on V, the paper's root dataset) to get a server update g0. Client update g_i (trainable weights) gets the
+    trust score TS_i = ReLU(cos(g_i, g0)) and is rescaled to the norm of g0; the new model is
+        w_t + sum_i TS_i * (|g0| / |g_i|) * g_i / sum_i TS_i            (global learning rate 1)
+    If every score is 0 the round is rejected (w_t kept). BatchNorm statistics take the FedAvg values.
+    Departures from the paper: the root set is V (2,198 records here, the paper uses 100), and g0 comes from the same
+    server-training pass the `train` controllers use (ft_epochs of plain SGD on V) instead of exactly the clients'
+    number of local iterations."""
+    finetunes_per_round = 1
+
+    def __init__(self):
+        self.last_scores = None
+
+    def propose(self, ctx: RoundContext) -> Weights:
+        finetune = ctx.require("finetune", self.name)
+        w0 = finetune([w.copy() for w in ctx.w_global])
+        g0 = [(a - g).astype(np.float64) if t else None for a, g, t in zip(w0, ctx.w_global, ctx.trainable)]
+        n0 = update_norm(g0)
+        scores, steps = [], []
+        for u in ctx.updates:
+            gi = [(a - g).astype(np.float64) if t else None for a, g, t in zip(u.weights, ctx.w_global, ctx.trainable)]
+            ni = update_norm(gi)
+            dot = sum(float(np.sum(a * b)) for a, b in zip(gi, g0) if a is not None)
+            cos = dot / (ni * n0) if ni > 0 and n0 > 0 else 0.0
+            scores.append(max(cos, 0.0))
+            steps.append((n0 / ni if ni > 0 else 0.0, gi))
+        self.last_scores = scores
+        total = sum(scores)
+        out = []
+        for i, (wg, wa, t) in enumerate(zip(ctx.w_global, ctx.fedavg(), ctx.trainable)):
+            if not t:
+                out.append(wa)
+            elif total <= 0:
+                out.append(wg.copy())
+            else:
+                step = sum(ts * scale * gi[i] for ts, (scale, gi) in zip(scores, steps)) / total
+                out.append((wg + step).astype(wg.dtype))
+        return out
 
 
 # -- mechanism controls of the TMLR supplement (Sec. 4.4, C1-C3): alternatives to the FedYogi candidate ----------

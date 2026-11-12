@@ -195,3 +195,78 @@ Order: R1, N1, N13, N5, N7, N4, N9, N10, N3, N6, N8, N2, N12.
 | H15 | N10 | attack strength sweep (implemented attacks only) |
 | H16-H19 | N6, N8, N2, N12 | need code or data first |
 - Clients per round: K = 20 of 100 (was 10), set on 2026-11-05 before any base run; Oort still selects them.
+
+## 8. Amendment 5 (2026-11-12, before any run below): one paper, and two falsification tests first
+
+### 8.1 Scope
+
+- **One paper.** There is one paper, for IEEE: select-then-train (`select_train`). It cites the TMLR paper "Predict, Measure, or Train?" (our co-author's) for selection by validation measurement and for server training. Paper 3's poisoning setting becomes this paper's Byzantine setting.
+- **Paper 1 hypotheses are not this paper's claims.** They are the TMLR paper's results.
+  - The ECG reruns already done (H1-H5, plus H3b: a post-hoc follow-up written after H3 was not supported, so exploratory) stay as background.
+  - No further Paper 1 runs. H6 is dropped.
+- **Dropped or on hold:**
+  - H10 and H11 are dropped.
+  - H8 and H9 (small and skewed server sets) are on hold, because the TMLR paper already covers server-set composition.
+  - H7 and H12-H15 are replaced by A1 and A2 below.
+- **Why A1 and A2 come first.** The method rests on two untested assumptions, A1 and A2. Each gets one quick falsification test before any other experiment. Every outcome's conclusion is written below, before any run.
+
+### 8.2 Common rules for A1 and A2
+
+- **Data and training:**
+  - `datasets/non_iid`, 120 rounds, E = 5, K = 20 of 100 with Oort.
+  - Calibrated settings (section 3); V = 2,198 records, matched.
+- **Seeds:** fresh test seeds 72-81 (10 seeds). No run on these seeds exists or has been looked at.
+- **Metric:** AUPRC-AUC on T. Comparisons are paired by seed.
+- **One primary test per assumption:** the one-sided paired t-test of the deciding row. Because there is exactly one primary test, there is no Holm correction on it. The other rows of the `compare_experiments.py` call are descriptive. This departs from section 7, which applied Holm across a whole call.
+- **Outcomes**, where d = mean improvement on the deciding row:
+  - **PASS:** d > 0 and p < 0.05.
+  - **FAIL (falsified):** d <= 0.
+  - **UNDECIDED:** d > 0 and p >= 0.05. Extend once to seeds 72-101 (30 seeds) with the same commands, and decide with the same rule, except that UNDECIDED at 30 seeds counts as FAIL. There is no further extension.
+- **Order:**
+  - A1 runs first, then A2, one process at a time.
+  - A2 is analysed whatever A1's outcome is.
+  - Nothing else is run until both are decided.
+
+### 8.3 A1: select-then-train beats each of its parts (no attack)
+
+- **Claim:** `select_train` beats both `select` and `train`.
+- **Runs** (default rules: fedavg, fedyogi; `train` uses the FedAvg base):
+  - `a1_select_train`, `a1_select`, `a1_train`;
+  - `a1_fedavg`, a clean reference that A2's validity check also uses.
+- **Deciding row:** `select_train` against the per-seed best of `select` and `train`.
+- **Why this is a severe test.** In calibration, training on V gave about +0.12 AUPRC-AUC over FedAvg (section 3, at 40 rounds), while selection gave about +0.02 (H1). If the selection gain does not survive on top of training, the combination is just training.
+- **Conclusions, declared now:**
+  - **PASS:** A1 survives, and `select_train` stays the method.
+  - **FAIL with d(vs train) <= 0:** selection adds nothing once the server trains on V. The method reduces to server training (Mai et al. 2023; the TMLR paper's "Train"), and the paper cannot claim the combination. Any contribution would have to rest on A2, reframed as server training under attack.
+  - **FAIL with d(vs select) <= 0:** training adds nothing. This contradicts calibration, so check the code for a bug before drawing any conclusion.
+  - **FAIL with both d(vs train) > 0 and d(vs select) > 0:** each part is beaten on average, but the better part of each seed is not. A1 is false as stated: the combination does not reliably beat the better of its parts.
+
+### 8.4 A2: under Byzantine clients, select-then-train beats existing defenses
+
+- **Claim:** with malicious clients, `select_train` over {fedavg, median, krum} beats existing defenses.
+- **Attack:**
+  - 20 of 100 clients are malicious, fixed per seed.
+  - Each uploads its honest update scaled ×5 with its direction reversed (`--attack standard --flip`), in every round.
+- **Krum's f:** fixed at 4 (the expected number of attackers among 20 selected) for every method that uses Krum, our candidate included. It is not the per-round true count used in sections 2 and 7.
+- **Ours:** `a2_select_train`, which is `select_train --rules fedavg,median,krum`.
+- **Existing methods:**
+  - `a2_fedavg`, `a2_median`, `a2_krum`;
+  - `a2_fltrust` (Cao et al. 2021, root set = V);
+  - `a2_train` (FedAvg plus server training);
+  - `a2_fs_paper` (FedStrategist as published: LinUCB, accuracy reward);
+  - `a2_sara`.
+- **SARA:** runs only after the `sara` controller has been checked against the original paper (Hu et al., SEAMS 2025), not the secondary description it was built from (section 4).
+  - If the paper cannot be obtained, SARA is left out of the best-of, and the paper must not claim to beat SARA.
+  - A2 is not decided before one of these two outcomes holds, with one exception. Adding a method to the best-of can only lower d, so a FAIL without SARA is final. A PASS or UNDECIDED without SARA waits.
+- **Deciding row:** `select_train` against the per-seed best of all existing methods.
+- **Validity check:** the attack must hurt. Attacked FedAvg (`a2_fedavg`) must score at least 0.05 AUPRC-AUC below clean FedAvg (`a1_fedavg`, paired by seed).
+  - If it does not, A2 is uninformative: neither PASS nor FAIL.
+  - In that case the existing-method runs are repeated once at ×10 before any decision.
+- **Conclusions, declared now:**
+  - **PASS:** A2 survives the quick test. A confirmatory Byzantine battery is pre-registered next: stealth attack, attacks switching on and off, attacker shares of 10-40%, 30 seeds.
+  - **FAIL, best existing method is `fltrust` or `train`:** server data alone defends as well, and A2 is false as stated. The paper may then claim at most "as good as". That needs its own pre-registered non-inferiority test, or the Byzantine setting is dropped.
+  - **FAIL, best existing method is median, Krum, FedStrategist or SARA:** A2 is false. Report which method wins.
+
+### 8.5 Commands
+
+The commands are in `EXPERIMENTS.md`, section 3.

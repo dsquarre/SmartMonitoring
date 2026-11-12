@@ -81,6 +81,33 @@ class TestRules(unittest.TestCase):
             np.testing.assert_allclose(got, exp, rtol=1e-6)
 
 
+    def test_fltrust_drops_opposed_updates_and_rescales(self):
+        ctx = make_round(n=3, sizes=[10, 10, 10])
+        d = [np.full_like(w, 0.1) if t else None for w, t in zip(ctx.w_global, ctx.trainable)]
+        ctx.finetune = lambda w: [a + x if x is not None else a for a, x in zip(w, d)]       # server update g0 = d
+
+        def shifted(k, bn):
+            return [g + k * x if x is not None else g + bn for g, x in zip(ctx.w_global, d)]
+        ctx.updates[0].weights = shifted(2.0, 0.0)      # agrees with g0, twice its norm
+        ctx.updates[1].weights = shifted(0.5, 0.0)      # agrees, half its norm
+        ctx.updates[2].weights = shifted(-5.0, 1.0)     # opposed and loud
+        rule = build_rule("fltrust")
+        out = rule.propose(ctx)
+        self.assertEqual(rule.last_scores[2], 0.0)
+        for got, g, x in zip(out[:2], ctx.w_global, d):  # both honest updates rescaled to |g0|: the step is g0
+            np.testing.assert_allclose(got, g + x, rtol=1e-5, atol=1e-6)
+        np.testing.assert_allclose(out[2], weighted_mean(ctx)[2], rtol=1e-6)   # BatchNorm statistic: FedAvg
+        for u in ctx.updates:
+            u.weights = shifted(-1.0, 0.0)
+        ctx._cache.clear()
+        for got, g in zip(build_rule("fltrust").propose(ctx)[:2], ctx.w_global):   # nobody trusted: keep w_t
+            np.testing.assert_array_equal(got, g)
+        _, info = build_controller("fltrust").step(ctx)
+        self.assertEqual(info["server_finetunes"], 1)
+        with self.assertRaises(ValueError):
+            build_rule("fltrust").propose(make_round())                    # no server data
+
+
 class TestControllers(unittest.TestCase):
     def test_spec_parsing(self):
         self.assertEqual(parse_spec("select_train"), ("select_train", None))
@@ -90,7 +117,7 @@ class TestControllers(unittest.TestCase):
             parse_spec("qfedavg")
         self.assertEqual(set(CONTROLLERS) >= {"static", "select", "select_train", "train", "train_select",
                                               "fedstrategist"}, True)
-        self.assertEqual(set(RULES), {"fedavg", "fedyogi", "median", "krum", "reject", "half", "normmatch"})
+        self.assertEqual(set(RULES), {"fedavg", "fedyogi", "median", "krum", "fltrust", "reject", "half", "normmatch"})
 
     def test_static(self):
         ctx = make_round()

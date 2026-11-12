@@ -54,7 +54,8 @@ class Static(Controller):
 
     def step(self, ctx):
         self.advance_rules(ctx)
-        return self.rules[self.rule].propose(ctx), _base_info(ctx, self.rule)
+        rule = self.rules[self.rule]
+        return rule.propose(ctx), _base_info(ctx, self.rule, finetunes=rule.finetunes_per_round)
 
 
 @CONTROLLERS.register("select")
@@ -205,7 +206,14 @@ class FedStrategist(Controller):
 
 @CONTROLLERS.register("sara")
 class Sara(Controller):
-    """SARA (Hu et al., SEAMS 2025) as the TMLR paper describes it: UCB over Byzantine-robust rules, updating only the
+    """UNVERIFIED: built from secondary descriptions, not from the SARA paper itself; do not report results from it
+    until it has been checked against Hu et al., "Adapting Aggregation Rule for Robust Federated Learning under Dynamic
+    Attacks", SEAMS 2025 (IEEE Xplore 11025919; paywalled, no public code). The abstract says SARA "adjust[s] relevant
+    modules within the aggregation rules" with a "carefully designed" UCB algorithm, so its arms may be rule modules
+    rather than whole rules, and its reward and UCB form are unknown. FedStrategist (arXiv 2507.14322, Sec. 3.2) says
+    only: "each aggregation rule is an arm, and a UCB algorithm selects the optimal rule based on its historical reward".
+
+    SARA (Hu et al., SEAMS 2025) as the TMLR paper describes it: UCB over Byzantine-robust rules, updating only the
     estimate of the rule it applied, rewarded with the accuracy and loss of the resulting global model. Reconstructed
     from that description (no public code): UCB1, a_t = argmax mean_a + c * sqrt(2 ln t / n_a) after one pull of
     each arm in order, reward = acc_V(w_t+1) - loss_V(w_t+1). Scored on V; the paper's evaluation used the test set,

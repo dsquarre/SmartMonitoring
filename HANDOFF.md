@@ -1,4 +1,4 @@
-# Handoff: SmartMonitoring ECG experiments (state on 2026-11-10)
+# Handoff: SmartMonitoring ECG experiments (state on 2026-11-12)
 
 Read this first if you are picking up this work, human or Claude. It covers what changed since the project was split
 into `distributed/` and `simple/`, what has been run, what the results say, and what to do next. Branch:
@@ -6,18 +6,24 @@ into `distributed/` and `simple/`, what has been run, what the results say, and 
 
 ## 1. What the project is
 
-Federated learning for AFib detection on 12-lead ECG (PTB-XL), supporting three papers:
+Federated learning for AFib detection on 12-lead ECG (PTB-XL). **There is one paper (IEEE): select-then-train
+(`select_train`).** Each round the server keeps the candidate rule with the lowest loss on its validation set V, then
+trains it on V.
+- It cites the TMLR paper "Predict, Measure, or Train?" (our co-author's) for selection and for server training.
+- The poisoning (Byzantine) setting is part of this paper.
+- The earlier "Paper 1" hypotheses (H1-H5, H3b) re-ran the TMLR paper's results on ECG. They are done and are background, not this paper's claims.
 
-| Paper | Question | Hypotheses |
-|---|---|---|
-| 1 | Replicate the TMLR "Predict, Measure, or Train?" supplement on ECG: does choosing the server rule each round by measuring candidates on a server validation set V help? | H1-H6 |
-| 2 | Selection plus training the global model on V (`select_train`, our method) | H7-H11 |
-| 3 | Measurement vs learned controllers (FedStrategist, SARA) under poisoning | H12-H15 |
+**Current step (protocol section 8, pre-registered 2026-11-12):** quick falsification tests of the two assumptions the
+method rests on.
+- **A1:** select-then-train beats both selection alone and training alone, with no attack.
+- **A2:** under Byzantine clients, it beats existing defenses (FedAvg, median, Krum, FLTrust, server training, FedStrategist, SARA).
+
+Nothing else is run until both are decided.
 
 Read next, in this order:
 1. `simple/README.md`: the simulator.
-2. `simple/EXPERIMENTS.md`: CLI reference and the exact command for every hypothesis.
-3. `simple/experiments/ecg_protocol.md`: pre-declared hypotheses, decision rules and amendments. Section 7 maps H1-H19 to protocol IDs.
+2. `simple/EXPERIMENTS.md`: CLI reference, and the commands for the current tests (section 3).
+3. `simple/experiments/ecg_protocol.md`: pre-registered claims, decision rules and amendments. Section 8 is the current plan.
 4. `distributed/README.md`: the deployed system and its plugins.
 5. `docs/poisoning_simulation.html`: the attacks and the defenses.
 
@@ -31,7 +37,7 @@ Commits:
 distributed/                 deployed system: FastAPI server, Redis, Celery, S3, WebSocket clients, dashboard
   server/plugins/            THE methods, shared by both halves
     selectors.py, oort.py    client selection: oort (TMLR supplement's port, FedScale defaults), random
-    rules.py                 fedavg, fedyogi, median, krum; mechanism controls reject, half, normmatch
+    rules.py                 fedavg, fedyogi, median, krum, fltrust; mechanism controls reject, half, normmatch
     controllers.py           static, select, select_train, train, train_select, random_mix, fedstrategist, sara
     bandits.py               LinUCB, CountUCB, update diagnostics (FedStrategist)
     attacks.py               poisoning: standard (x5), stealth, flip; copied byte-identical to client/attacks.py
@@ -48,7 +54,7 @@ It is then available as `-a name` in the simulator and as `FL_AGGREGATOR=name` i
 
 Do not change `distributed/start.sh` or `distributed/stop.sh`.
 
-### Changes since `d4833bd` (in the same commit as this file)
+### Changes since `d4833bd`
 
 - `simple/compare_experiments.py` now writes:
   - every metric: accuracy, loss, F2, Brier, energy, latency and rounds-to-target;
@@ -57,8 +63,14 @@ Do not change `distributed/start.sh` or `distributed/stop.sh`.
 - `simple/simulate_fl.py`: **bug fix.** `random_mix` used the same coin-flip schedule for every seed. It now draws one schedule per seed (`controller_args.setdefault("seed", seed)`). Test: `test_random_mix_draws_a_schedule_per_seed`.
 - `simple/EXPERIMENTS.md`: new outputs documented, and Hypothesis 3b added (see section 4).
 - `docs/poisoning_simulation.html`: the poisoning setup and server defenses, for the PR.
+- 2026-11-12:
+  - The plan was narrowed to one paper.
+  - A1 and A2 were pre-registered (protocol section 8).
+  - The `fltrust` rule was added, with tests.
+  - Static controllers now report a rule's own training passes on V.
+  - The `sara` controller is marked unverified until it is checked against the SARA paper.
 
-Tests: `cd simple && python -m unittest discover -s tests` (11 pass) and `cd distributed && python -m unittest discover -s tests`.
+Tests: `cd simple && python -m unittest discover -s tests` (11 pass; the plugin tests in `distributed/tests/test_plugins.py` pass too, while 4 `test_client_model` tests fail on Windows temp-file cleanup, before and after these changes) and `cd distributed && python -m unittest discover -s tests`.
 
 ## 3. Running experiments
 
@@ -73,7 +85,9 @@ Tests: `cd simple && python -m unittest discover -s tests` (11 pass) and `cd dis
 - **Memory (Windows):** each `simulate_fl.py` process commits about 8-9.5 GB of virtual memory (TF/CUDA start-up). Two in parallel plus another heavy program crashed a run. **Run one process at a time.**
 - **Results (not in git):** `simple/results/` is gitignored. `compare_experiments.py` needs each run's `metrics.csv` and `summary.json`, so copy the `results/h*` folders (CSV/JSON only) to compare against earlier runs.
 
-## 4. Results so far (30 seeds, 120 rounds; metric AUPRC-AUC = mean test AUPRC over all rounds)
+## 4. Background results: ECG reruns of the TMLR paper (30 seeds, 120 rounds; metric AUPRC-AUC = mean test AUPRC over all rounds)
+
+These reproduce the TMLR paper's selection results on ECG. They are not claims of the IEEE paper.
 
 Decision rule: one-sided paired t-test with Holm correction across the rows of one `compare_experiments.py` call, at α = 0.05. "At least as good" means non-inferiority with a margin of 0.01. Every hypothesis below was run on the label-skewed data unless stated.
 
@@ -95,23 +109,26 @@ Flawed runs, kept for the record: `results/h3_random_mix_fixedschedule` and `res
 
 ## 5. Next steps
 
-1. **Record H3b in the protocol.** Add H3b to `simple/experiments/ecg_protocol.md` as Amendment 5: a post-hoc follow-up added after H3 failed. It is already in `EXPERIMENTS.md`.
-2. **H6, selection score.** Run `-a select --select-score auprc` and `--select-score brier` on `non_iid`. It is also worth running on the patient split, where loss misled the selector (an extra run not in the protocol; declare it before running).
-3. **H7-H11 (Paper 2):** commands are in `EXPERIMENTS.md`.
-4. **H12-H15 (Paper 3):** commands are in `EXPERIMENTS.md`. Before running:
-   - The commands use `-a select`, so they include no server training. Consider adding `-a select_train --rules fedavg,median,krum` so the full method is tested, and declare it in the protocol first.
-   - In the simulator, Krum is given the true number of attackers each round, which no real server knows. Report that, or fix f with `--rule-args '{"krum": {"num_malicious": 4}}'`.
-   - SARA has no public code; the `sara` controller is a reconstruction from the TMLR paper's description.
-5. **Commit:** commit the work when the user asks.
+1. **Run A1, then A2.** The commands are in `simple/EXPERIMENTS.md` section 3. The claims, the decision rule and the conclusion for every outcome are fixed in `simple/experiments/ecg_protocol.md` section 8.
+   - **Seeds and settings:** fresh seeds 72-81, 120 rounds, one process at a time.
+   - **Run time:** A1 is 4 runs, about 5 h; A2 is 7 runs, about 10-12 h.
+   - **Decisions:** decide each assumption exactly as section 8 says. Do not change a claim or a rule after seeing results; an extension to seeds 72-101 is allowed only for an UNDECIDED outcome.
+2. **SARA must be checked against the original paper before `a2_sara` runs.** The `sara` controller was built from secondary descriptions (the TMLR paper and FedStrategist), not from SARA itself.
+   - The paper is Hu et al., "Adapting Aggregation Rule for Robust Federated Learning under Dynamic Attacks", SEAMS 2025 (IEEE Xplore 11025919). It is paywalled and has no preprint or code.
+   - Get the PDF through institutional access and save it as `docs/papers/hu2025_sara.pdf` (gitignored, so keep it local).
+   - Then compare its arms ("modules within the aggregation rules"), reward, UCB form and attack schedule with the `sara` controller, and fix the controller.
+   - If the paper can't be obtained, A2 is decided without SARA, and the paper must not claim to beat SARA.
+3. **After both decisions:** pre-register the follow-ups for the outcomes in protocol section 8 before running anything.
+   - **If A2 passes:** stealth attacks, attacks switching on and off, 10-40% attackers, 30 seeds.
+
+The retired hypotheses and the reasons are listed in `EXPERIMENTS.md` section 3.
 
 **Not implemented:**
 - backdoor and label-flipping attacks;
-- the trimmed mean, Multi-Krum, FLTrust and Zeno rules;
-- FedProx client branches, needed for H18;
-- PTB-XL site metadata, needed for H16;
-- the PhysioNet 2021 data, needed for H19.
+- the trimmed mean, Multi-Krum and Zeno rules.
 
-The MAD norm filter from `main` was removed in the restructure, so FedAvg has no defense on this branch.
+FLTrust was added on 2026-11-12 (`-a fltrust`, Cao et al. 2021, with V as its root set). The MAD norm filter from
+`main` was removed in the restructure, so FedAvg has no defense on this branch.
 
 ## 6. How the project owner works
 

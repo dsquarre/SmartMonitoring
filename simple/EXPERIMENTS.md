@@ -1,8 +1,8 @@
 # SmartMonitoring Experimentation Guide (simple)
 
-Run each hypothesis by hand, one at a time: simulate the methods it needs with `simulate_fl.py`, then test them with
-`compare_experiments.py`. The hypotheses and decision rules are pre-declared in `experiments/ecg_protocol.md`
-(section 7 maps these numbers to the protocol).
+Run each test by hand, one at a time: simulate the methods it needs with `simulate_fl.py`, then test them with
+`compare_experiments.py`. Claims, decision rules and conclusions are pre-registered in `experiments/ecg_protocol.md`
+before any run; the current plan is its section 8.
 
 **Before anything:** open a terminal in `simple/` and activate the conda env, or TensorFlow runs on the CPU (the
 banner prints `Device : GPU` when it is right):
@@ -18,8 +18,8 @@ conda activate py310
 
 The base parameters are the defaults: 120 rounds, 5 local epochs, 30 seeds (42-71), K = 20 of 100 clients,
 label-skewed data `../datasets/non_iid`, Oort client selection, and the calibrated client lr 0.1, FedYogi step 0.01,
-per-record normalisation. Change any of them with the flags below. Every hypothesis uses the label-skewed
-split (the default `--data-dir`); only H5 also runs the IID split and the patient split, as milder heterogeneity levels.
+per-record normalisation. Change any of them with the flags below. Every test uses the label-skewed
+split (the default `--data-dir`); only the background H5 runs also used the IID split and the patient split.
 
 ### FL controls
 | Parameter | Default | Description |
@@ -39,7 +39,7 @@ split (the default `--data-dir`); only H5 also runs the IID split and the patien
 ### Server strategy and client selection
 | Parameter | Default | Description |
 | :--- | :--- | :--- |
-| `-a`, `--aggregator` | `select_train` | A rule (`fedavg`, `fedyogi`, `median`, `krum`) or a controller: `select` (keep the candidate with the lower validation loss), `train` (FedAvg, then train on V), `select_train` (ours), `train_select`, `random_mix`, `fedstrategist`, `sara` |
+| `-a`, `--aggregator` | `select_train` | A rule (`fedavg`, `fedyogi`, `median`, `krum`, `fltrust`) or a controller: `select` (keep the candidate with the lower validation loss), `train` (FedAvg, then train on V), `select_train` (ours), `train_select`, `random_mix`, `fedstrategist`, `sara` |
 | `--rules` | controller's own | Candidate rules of a controller, e.g. `fedavg,median,krum` |
 | `-s`, `--selector` | `oort` | Client selector: `oort`, `random` |
 | `--mix-p` | | `random_mix`: probability of FedYogi each round |
@@ -94,171 +94,78 @@ Output files:
 
 ---
 
-## 3. Hypotheses
+## 3. The paper: select-then-train, and the two assumptions it rests on
 
-### Paper 1: selecting the aggregator by measuring on validation data
+There is one paper, for IEEE: select-then-train (`select_train`). Each round the server builds every rule's
+candidate, keeps the one with the lowest loss on its validation set V, then trains it on V. The paper cites the TMLR
+paper "Predict, Measure, or Train?" for selection and for server training, and takes Paper 3's poisoning setting as
+its Byzantine setting.
 
-#### Hypothesis 1: the selector beats both static rules
+The method rests on two untested assumptions. Each gets one quick falsification test before anything else is run.
+The claims, the decision rule and the conclusion for every outcome were pre-registered in
+`experiments/ecg_protocol.md` section 8, before any of these runs. Both tests use:
+- fresh seeds 72-81 (10 seeds), 120 rounds, `non_iid`;
+- one primary test: the deciding row, a one-sided paired t-test with no Holm correction;
+- outcomes PASS (gain > 0, p < 0.05), FAIL (gain <= 0) or UNDECIDED. UNDECIDED extends once to seeds 72-101.
+
+### Assumption 1: select-then-train beats each of its parts (no attack)
 ```bash
-python simulate_fl.py -a fedavg -o results/h1_fedavg
-python simulate_fl.py -a fedyogi -o results/h1_fedyogi
-python simulate_fl.py -a select -o results/h1_select
-python compare_experiments.py --dirs results/h1_select results/h1_fedavg results/h1_fedyogi --labels Selector FedAvg FedYogi --best-of FedAvg,FedYogi -o results/hypothesis1
+python simulate_fl.py -a fedavg --seeds 72-81 -o results/a1_fedavg
+python simulate_fl.py -a select --seeds 72-81 -o results/a1_select
+python simulate_fl.py -a train --seeds 72-81 -o results/a1_train
+python simulate_fl.py -a select_train --seeds 72-81 -o results/a1_select_train
+python compare_experiments.py --dirs results/a1_select_train results/a1_select results/a1_train results/a1_fedavg --labels SelectTrain Selector Training FedAvg --best-of Selector,Training -o results/assumption1
 ```
-Deciding row: `best of FedAvg,FedYogi`. The "rules kept" column gives the selector's FedYogi share, needed for H3.
+Deciding row: `best of Selector,Training`. FedAvg is the clean reference for A2's validity check.
 
-#### Hypothesis 2: no simpler mechanism explains the gain
-The FedYogi candidate is replaced by rejecting the round, half a FedAvg step, or FedAvg's direction at FedYogi's step size.
+### Assumption 2: under Byzantine clients, select-then-train beats existing defenses
+In this test, 20 of 100 clients upload their update scaled ×5 and reversed, every round. Krum's f is fixed at 4 for
+every method that uses Krum.
 ```bash
-python simulate_fl.py -a select --rules fedavg,reject -o results/h2_reject
-python simulate_fl.py -a select --rules fedavg,half -o results/h2_half
-python simulate_fl.py -a select --rules fedavg,normmatch -o results/h2_normmatch
-python compare_experiments.py --dirs results/h1_select results/h2_reject results/h2_half results/h2_normmatch --labels Selector Reject Half NormMatch -o results/hypothesis2
+P="--seeds 72-81 --num-malicious 20 --attack standard --flip --rule-args {\"krum\":{\"num_malicious\":4}}"
+python simulate_fl.py -a select_train --rules fedavg,median,krum $P -o results/a2_select_train
+python simulate_fl.py -a fedavg $P -o results/a2_fedavg
+python simulate_fl.py -a median $P -o results/a2_median
+python simulate_fl.py -a krum $P -o results/a2_krum
+python simulate_fl.py -a fltrust $P -o results/a2_fltrust
+python simulate_fl.py -a train $P -o results/a2_train
+python simulate_fl.py -a fedstrategist --fs-preset paper $P -o results/a2_fs_paper
+python simulate_fl.py -a sara $P -o results/a2_sara          # only after the sara controller is checked against the SARA paper
+python compare_experiments.py --dirs results/a2_select_train results/a2_fedavg results/a2_median results/a2_krum results/a2_fltrust results/a2_train results/a2_fs_paper results/a2_sara --labels SelectTrain FedAvg Median Krum FLTrust Training FS-paper SARA --best-of FedAvg,Median,Krum,FLTrust,Training,FS-paper,SARA -o results/assumption2
 ```
-Supported when the selector beats all three controls.
+Deciding row: `best of FedAvg,...,SARA`. If the SARA paper cannot be obtained, drop SARA from the call and from the
+claim. Until SARA is checked, run the same call without SARA into `results/assumption2_without_sara`. A FAIL there is
+final, since adding SARA can only raise the best-of.
 
-#### Hypothesis 3: measuring beats mixing the two rules at random
-`P` = the selector's FedYogi share from H1 (e.g. `0.36`).
+Validity check: attacked FedAvg must score at least 0.05 AUPRC-AUC below `a1_fedavg`. If it does not, the attack is
+too weak and A2 is undecided.
+
+### After the two tests
+What follows depends on the outcomes declared in the protocol (section 8). Nothing is run until both are decided.
+- **Both pass:** pre-register the confirmatory runs: A1 at 30 seeds, and the Byzantine battery (stealth, attacks
+  switching on and off as in SARA's setting, 10-40% attackers).
+- **A1 fails:** the combination is not the contribution. See the protocol for what the paper can still claim.
+
+### Background: ECG reruns of the TMLR paper's results (done; not this paper's claims)
+H1-H5 and H3b reran the TMLR paper's Paper 1 hypotheses on ECG (seeds 42-71). Results and their reading are in
+`../HANDOFF.md` section 4, and the comparison folders in `results/hypothesis*`. The commands, for reproducibility:
 ```bash
-python simulate_fl.py -a random_mix --mix-p P -o results/h3_random_mix
-python compare_experiments.py --dirs results/h1_select results/h3_random_mix --labels Selector RandomMix -o results/hypothesis3
-```
-
-#### Hypothesis 3b (follow-up): the mixing ratio matters, and the selector finds a good one without tuning
-Added after H3 was not supported (the selector did not beat random mixing at its own ratio, p = 0.324). Random
-mixing at other ratios should do worse than at the selector's ratio and worse than the selector.
-```bash
-python simulate_fl.py -a random_mix --mix-p 0.10 -o results/h3b_mix_p010
-python simulate_fl.py -a random_mix --mix-p 0.50 -o results/h3b_mix_p050
-python compare_experiments.py --dirs results/h1_select results/h3_random_mix results/h3b_mix_p010 results/h3b_mix_p050 --labels Selector Mix0.32 Mix0.10 Mix0.50 -o results/hypothesis3b
-python compare_experiments.py --dirs results/h3_random_mix results/h3b_mix_p010 results/h3b_mix_p050 --labels Mix0.32 Mix0.10 Mix0.50 -o results/hypothesis3b_ratio
-```
-Supported when the selector beats both Mix0.10 and Mix0.50 (`hypothesis3b`). `hypothesis3b_ratio` shows whether 0.32
-itself beats the other ratios.
-
-#### Hypothesis 4: the selector reaches AUPRC 0.70 in fewer rounds (no new runs)
-```bash
-python compare_experiments.py --dirs results/h1_select results/h1_fedavg results/h1_fedyogi --labels Selector FedAvg FedYogi --best-of FedAvg,FedYogi --metric rounds_to_target --target 0.70 -o results/hypothesis4
-```
-
-#### Hypothesis 5: the selector helps at every level of client heterogeneity
-The label-skewed level is H1. Run the same three methods on the IID split and on the patient split:
-```bash
-python simulate_fl.py -a fedavg --data-dir ../datasets/iid -o results/h5_iid_fedavg
-python simulate_fl.py -a fedyogi --data-dir ../datasets/iid -o results/h5_iid_fedyogi
-python simulate_fl.py -a select --data-dir ../datasets/iid -o results/h5_iid_select
-python simulate_fl.py -a fedavg --data-dir ../datasets/data/non_iid -o results/h5_patient_fedavg
-python simulate_fl.py -a fedyogi --data-dir ../datasets/data/non_iid -o results/h5_patient_fedyogi
-python simulate_fl.py -a select --data-dir ../datasets/data/non_iid -o results/h5_patient_select
-python compare_experiments.py --dirs results/h5_iid_select results/h5_iid_fedavg results/h5_iid_fedyogi --labels Selector FedAvg FedYogi --best-of FedAvg,FedYogi --test ni -o results/hypothesis5_iid
-python compare_experiments.py --dirs results/h5_patient_select results/h5_patient_fedavg results/h5_patient_fedyogi --labels Selector FedAvg FedYogi --best-of FedAvg,FedYogi --test ni -o results/hypothesis5_patient
-```
-Supported when the selector is at least as good as the best static rule at every level (H1 covers label skew).
-
-#### Hypothesis 6: validation loss is an adequate selection score
-```bash
-python simulate_fl.py -a select --select-score auprc -o results/h6_select_auprc
-python simulate_fl.py -a select --select-score brier -o results/h6_select_brier
-python compare_experiments.py --dirs results/h6_select_auprc results/h1_select --labels ScoreAUPRC ScoreLoss -o results/hypothesis6_auprc
-python compare_experiments.py --dirs results/h6_select_brier results/h1_select --labels ScoreBrier ScoreLoss -o results/hypothesis6_brier
-```
-Supported (loss stays the score) when neither alternative beats loss.
-
-### Paper 2: selection plus training on the server's data
-
-#### Hypothesis 7: with the full server set, select-then-train is at least as good as either step alone
-```bash
-python simulate_fl.py -a train -o results/h7_train
-python simulate_fl.py -a select_train -o results/h7_select_train
-python simulate_fl.py -a train_select --select-frac 0.2 -o results/h7_train_select
-python compare_experiments.py --dirs results/h7_select_train results/h1_select results/h7_train results/h7_train_select results/h1_fedavg results/h1_fedyogi --labels SelectTrain Selector Training TrainSelect FedAvg FedYogi --best-of Selector,Training --best-of FedAvg,FedYogi --test ni -o results/hypothesis7
-```
-Deciding row: `best of Selector,Training`.
-
-#### Hypothesis 8: the same with a small server set (280 records, matched)
-```bash
-python simulate_fl.py -a select --val-size 280 -o results/h8_select
-python simulate_fl.py -a train --val-size 280 -o results/h8_train
-python simulate_fl.py -a select_train --val-size 280 -o results/h8_select_train
-python simulate_fl.py -a train_select --select-frac 0.2 --val-size 280 -o results/h8_train_select
-python compare_experiments.py --dirs results/h8_select_train results/h8_select results/h8_train results/h8_train_select --labels SelectTrain Selector Training TrainSelect --best-of Selector,Training --test ni -o results/hypothesis8
+python simulate_fl.py -a fedavg -o results/h1_fedavg            # likewise fedyogi, select
+python simulate_fl.py -a select --rules fedavg,reject -o results/h2_reject      # likewise half, normmatch
+python simulate_fl.py -a random_mix --mix-p 0.324 -o results/h3_random_mix      # H3b: --mix-p 0.10 and 0.50
+python simulate_fl.py -a fedavg --data-dir ../datasets/iid -o results/h5_iid_fedavg   # H5: fedavg, fedyogi, select on iid and data/non_iid
 ```
 
-#### Hypothesis 9: the same with a skewed small server set (280 records, 50% AFib)
-```bash
-python simulate_fl.py -a select --val-size 280 --val-pos-share 0.5 -o results/h9_select
-python simulate_fl.py -a train --val-size 280 --val-pos-share 0.5 -o results/h9_train
-python simulate_fl.py -a select_train --val-size 280 --val-pos-share 0.5 -o results/h9_select_train
-python simulate_fl.py -a train_select --select-frac 0.2 --val-size 280 --val-pos-share 0.5 -o results/h9_train_select
-python compare_experiments.py --dirs results/h9_select_train results/h9_select results/h9_train results/h9_train_select results/h1_fedavg results/h1_fedyogi --labels SelectTrain Selector Training TrainSelect FedAvg FedYogi --best-of Selector,Training --best-of FedAvg,FedYogi --test ni -o results/hypothesis9
-```
-Two deciding rows: `best of Selector,Training` (H9) and `best of FedAvg,FedYogi` (H9r: robustness to a skewed server set).
+### Retired
+| Was | Why |
+| :--- | :--- |
+| H6 (selection score) | A Paper 1 question, answered by the TMLR paper |
+| H7 | Replaced by Assumption 1 |
+| H8, H9 (small and skewed server sets) | On hold: the TMLR paper covers server-set composition |
+| H10 (server-set size sweep), H11 (scoring split) | Dropped |
+| H12-H15 (poisoning) | Replaced by Assumption 2 and, if it passes, its confirmatory battery |
+| H16-H19 | Not planned |
 
-#### Hypothesis 10: where training on V overtakes selection (server-set size sweep)
-Sizes 280 (H8) and 2,198 (H1, H7) are done; run 50, 100, 560 and 1100 the same way, e.g. for 50:
-```bash
-python simulate_fl.py -a select --val-size 50 -o results/h10_v50_select
-python simulate_fl.py -a train --val-size 50 -o results/h10_v50_train
-python simulate_fl.py -a select_train --val-size 50 -o results/h10_v50_select_train
-python compare_experiments.py --dirs results/h10_v50_select results/h10_v50_train --labels Selector Training --test ni -o results/hypothesis10_v50_select
-python compare_experiments.py --dirs results/h10_v50_select_train results/h10_v50_select results/h10_v50_train --labels SelectTrain Selector Training --best-of Selector,Training --test ni -o results/hypothesis10_v50
-```
-Predictions: training beats selection at 2,198 (`--dirs results/h7_train results/h1_select`, superiority); selection is
-at least as good as training at 50; select-then-train is at least as good as the better step at every size.
-
-#### Hypothesis 11: a held-out scoring split fixes select-then-train on a small server set
-```bash
-python simulate_fl.py -a select_train --val-size 280 --select-frac 0.2 -o results/h11_select_train_split
-python simulate_fl.py -a select_train --val-size 280 --val-pos-share 0.5 --select-frac 0.2 -o results/h11_select_train_split_afib50
-python compare_experiments.py --dirs results/h11_select_train_split results/h8_select_train --labels Split NoSplit -o results/hypothesis11_matched
-python compare_experiments.py --dirs results/h11_select_train_split_afib50 results/h9_select_train --labels Split NoSplit -o results/hypothesis11_afib50
-```
-
-### Paper 3: measurement vs learned controllers under poisoning (20 of 100 clients malicious)
-
-#### Hypothesis 12: standard attack (malicious clients upload 5x their honest update)
-```bash
-python simulate_fl.py -a fedavg --num-malicious 20 --attack standard -o results/h12_fedavg
-python simulate_fl.py -a median --num-malicious 20 --attack standard -o results/h12_median
-python simulate_fl.py -a krum --num-malicious 20 --attack standard -o results/h12_krum
-python simulate_fl.py -a fedstrategist --fs-preset paper --num-malicious 20 --attack standard -o results/h12_fs_paper
-python simulate_fl.py -a fedstrategist --fs-preset authors --num-malicious 20 --attack standard -o results/h12_fs_authors
-python simulate_fl.py -a fedstrategist --fs-preset paper --fs-reward loss --num-malicious 20 --attack standard -o results/h12_fs_loss
-python simulate_fl.py -a sara --num-malicious 20 --attack standard -o results/h12_sara
-python simulate_fl.py -a select --rules fedavg,median,krum --num-malicious 20 --attack standard -o results/h12_select_robust
-python compare_experiments.py --dirs results/h12_select_robust results/h12_fs_paper results/h12_fs_authors results/h12_fs_loss results/h12_sara results/h12_fedavg results/h12_median results/h12_krum --labels Selector FS-paper FS-authors FS-loss SARA FedAvg Median Krum --best-of FS-paper,FS-authors,FS-loss --best-of FS-paper,FS-authors,FS-loss,SARA --best-of FedAvg,Median,Krum --test ni -o results/hypothesis12
-```
-Deciding rows: `best of FS-paper,FS-authors,FS-loss` (vs FedStrategist) and `SARA`. The table also shows server cost.
-
-#### Hypothesis 13: flipped attack (the malicious update also points the wrong way)
-The same eight commands as H12 with `--flip` added and `h13_` folders, then the same comparison into `results/hypothesis13`.
-
-#### Hypothesis 14: attacks that switch on and off (SARA's setting)
-Attackers active in rounds 1-40 and 81-120:
-```bash
-python simulate_fl.py -a select --rules fedavg,median,krum --num-malicious 20 --attack standard --attack-rounds 1-40,81-120 -o results/h14_select_robust
-python simulate_fl.py -a sara --num-malicious 20 --attack standard --attack-rounds 1-40,81-120 -o results/h14_sara
-python simulate_fl.py -a fedstrategist --fs-preset paper --num-malicious 20 --attack standard --attack-rounds 1-40,81-120 -o results/h14_fs_paper
-python simulate_fl.py -a fedstrategist --fs-preset authors --num-malicious 20 --attack standard --attack-rounds 1-40,81-120 -o results/h14_fs_authors
-python simulate_fl.py -a fedstrategist --fs-preset paper --fs-reward loss --num-malicious 20 --attack standard --attack-rounds 1-40,81-120 -o results/h14_fs_loss
-python compare_experiments.py --dirs results/h14_select_robust results/h14_sara results/h14_fs_paper results/h14_fs_authors results/h14_fs_loss --labels Selector SARA FS-paper FS-authors FS-loss --best-of FS-paper,FS-authors,FS-loss --test ni -o results/hypothesis14
-```
-
-#### Hypothesis 15: attack strength sweep
-Repeat H12 with `--num-malicious 10`, `30` and `40`, and with `--attack stealth`, into folders such as
-`results/h15_m30_standard_<method>`, and compare as in H12. Label flipping, trimmed mean, Multi-Krum and FLTrust are
-not implemented yet.
-
-### Not runnable yet (need code or data first)
-| # | Hypothesis | Needs |
-| :--- | :--- | :--- |
-| 16 | A server set from one hospital: selection beats training | PTB-XL site metadata in the data loader |
-| 17 | Select-then-train beats FLTrust and Zeno | FLTrust and Zeno rules |
-| 18 | Oracle and predictability tests of the TMLR paper on ECG | FedProx client branches |
-| 19 | H1, H7, H12 replicate on PhysioNet 2021 (clients by site) | the dataset and a 1-D ResNet |
-
-**Checks before H16-H19:** client lr 0.2 and 0.3 on tuning seeds 1-2 (`--seeds 1-2 --lr 0.2 -o results/check_lr0.2`),
-and removing the 3 test patients that also appear in client training data.
 
 ---
 

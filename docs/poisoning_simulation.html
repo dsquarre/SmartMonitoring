@@ -115,14 +115,14 @@ footer { margin-top: 56px; padding-top: 16px; border-top: 1px solid var(--border
 <main>
 
 <header>
-  <p class="kicker">Branch ecg-plugins-oort-sara · Paper 3 groundwork</p>
+  <p class="kicker">Branch ecg-plugins-oort-sara · Byzantine setting of the select-then-train paper</p>
   <h1>Simulating untrustworthy clients</h1>
   <p class="lede">This branch adds model-poisoning clients to both the simulator (<code>simple/simulate_fl.py</code>) and the deployed system (<code>distributed/</code>). It also adds the server-side rules and learned controllers that have to cope with them. This page lists what each attack does, where it runs, which defenses face it, and what is not simulated.</p>
   <div class="facts">
     <div class="fact"><b>3 attack types</b><span>standard (×5), stealth (norm-matched), flip (reverse direction)</span></div>
     <div class="fact"><b>On/off schedule</b><span>attackers can be active only in chosen rounds</span></div>
     <div class="fact"><b>One attack module</b><span><code>attacks.py</code>, byte-identical on server and client</span></div>
-    <div class="fact"><b>4 hypotheses</b><span>H12–H15 written and runnable; not yet run</span></div>
+    <div class="fact"><b>1 test first</b><span>Assumption 2, pre-registered; not yet run</span></div>
   </div>
 </header>
 
@@ -258,6 +258,7 @@ docker compose -f docker-compose.yml -f override.yml up</code></pre>
     <tr><td><code>fedavg</code></td><td>Sample-size-weighted mean</td><td>No defense; the undefended baseline.</td></tr>
     <tr><td><code>median</code></td><td>Coordinate-wise median (the lower middle value for an even count)</td><td>Ignores a minority of large or reversed coordinates.</td></tr>
     <tr><td><code>krum</code></td><td>Keeps the one client model with the smallest sum of squared distances to its n − f − 2 nearest neighbours</td><td>Drops outliers. Falls back to FedAvg when n ≤ 2f + 2.</td></tr>
+    <tr><td><code>fltrust</code></td><td>Cao et al., NDSS 2021. The server trains the current model on V to get its own update g<sub>0</sub>. Each client update is weighted by ReLU(cos(g<sub>i</sub>, g<sub>0</sub>)) and rescaled to |g<sub>0</sub>|.</td><td>Ignores reversed updates (zero trust) and neutralises scaling. It's the existing defense that, like ours, uses the server's own data.</td></tr>
     <tr><td><code>fedyogi</code></td><td>Adaptive server step on the FedAvg pseudo-gradient</td><td>Not robust; it is in the rule set for Papers 1 and 2.</td></tr>
   </tbody>
 </table>
@@ -268,10 +269,10 @@ docker compose -f docker-compose.yml -f override.yml up</code></pre>
 <table>
   <thead><tr><th>Controller</th><th>Arms or candidates (poisoning runs)</th><th>How it chooses</th><th>Models scored on V per round</th></tr></thead>
   <tbody>
-    <tr><td><code>select</code> (Paper 1)</td><td class="num">3: fedavg, median, krum</td><td>No bandit; nothing about the choice carries over between rounds. Builds all three candidates, scores each on V and keeps the one with the lowest loss. This is the selector H12–H15 use.</td><td class="num">3</td></tr>
-    <tr><td><code>select_train</code> (Paper 2, the system default)</td><td class="num">3: fedavg, median, krum</td><td>Same choice as <code>select</code>, then the server trains the kept model on V: 1 epoch of SGD at the client learning rate (<code>--ft-epochs</code>, <code>--ft-lr-scale</code>). Without <code>--select-frac</code>, the same V is used for scoring and training. Not in the H12–H15 commands as written.</td><td class="num">3, plus 1 training pass</td></tr>
+    <tr><td><code>select</code> (selection only)</td><td class="num">3: fedavg, median, krum</td><td>No bandit; nothing about the choice carries over between rounds. Builds all three candidates, scores each on V and keeps the one with the lowest loss.</td><td class="num">3</td></tr>
+    <tr><td><code>select_train</code> (ours, the system default)</td><td class="num">3: fedavg, median, krum</td><td>Same choice as <code>select</code>, then the server trains the kept model on V: 1 epoch of SGD at the client learning rate (<code>--ft-epochs</code>, <code>--ft-lr-scale</code>). Without <code>--select-frac</code>, the same V is used for scoring and training. This is the method Assumption 2 tests.</td><td class="num">3, plus 1 training pass</td></tr>
     <tr><td><code>fedstrategist</code></td><td class="num">3: fedavg, median, krum</td><td>Contextual bandit: <code>paper</code> = LinUCB, <code>authors</code> = CountUCB. The context is 3 update diagnostics (variance of norms, mean cosine similarity, norm of the mean), plus a bias term in the <code>paper</code> preset. Reward = 100·Δaccuracy on V − 0.5·cost(rule), or the drop in loss with <code>--fs-reward loss</code>.</td><td class="num">1 (2 in round 1)</td></tr>
-    <tr><td><code>sara</code></td><td class="num">3: fedavg, median, krum</td><td>UCB1 with no context. Tries each arm once, then picks mean + c·√(2 ln t / n<sub>a</sub>). Reward = accuracy − loss on V. Reconstructed from the TMLR paper's description, since there is no public code.</td><td class="num">1</td></tr>
+    <tr><td><code>sara</code></td><td class="num">3: fedavg, median, krum</td><td>UCB1 with no context. Tries each arm once, then picks mean + c·√(2 ln t / n<sub>a</sub>). Reward = accuracy − loss on V. <strong>Unverified:</strong> built from the TMLR paper's and FedStrategist's descriptions, not from the SARA paper, which is paywalled and has no public code. Its abstract says it adjusts "modules within the aggregation rules", so the arms may differ. It must be checked against the paper before its results are used.</td><td class="num">1</td></tr>
   </tbody>
 </table>
 </div>
@@ -295,23 +296,24 @@ docker compose -f docker-compose.yml -f override.yml up</code></pre>
     <tr><td>Data poisoning such as label flipping (the attacker changes its training data, not its upload)</td><td><span class="tag no">not implemented</span></td></tr>
     <tr><td>Adaptive attackers that know the defense, and colluding attackers that coordinate their uploads</td><td><span class="tag no">not implemented</span> Attackers act independently; stealth only matches the norm.</td></tr>
     <tr><td>Lying to the client selector: in the deployed system a client reports its own Oort utility and could inflate it to be picked more often</td><td><span class="tag no">not simulated</span> In the simulator, utility comes from honest training.</td></tr>
-    <tr><td>Trimmed mean, Multi-Krum, FLTrust, Zeno</td><td><span class="tag no">not implemented</span> FLTrust and Zeno are needed for H17.</td></tr>
+    <tr><td>Trimmed mean, Multi-Krum, Zeno</td><td><span class="tag no">not implemented</span> FLTrust is implemented as of 2026-11-12.</td></tr>
     <tr><td>Stealth and on/off attacks on the deployed system</td><td><span class="tag sim">simulator only</span></td></tr>
   </tbody>
 </table>
 </div>
 <div class="note"><p><strong>Removed from main:</strong> the MAD norm filter (<code>filter_poisoned_clients</code>), which dropped updates with norm z-score above 3 before FedAvg, was removed along with the old <code>server/aggregator.py</code>. FedAvg on this branch is undefended; robustness comes from choosing <code>median</code>, <code>krum</code> or a controller over them. Re-adding the filter as a rule plugin would make it comparable with the others.</p></div>
 
-<h2>Planned experiments (Paper 3)</h2>
-<p>The commands are in <code>simple/EXPERIMENTS.md</code>. All use 20 of 100 clients malicious, 30 seeds and 120 rounds, unless stated otherwise. None has been run yet.</p>
+<h2>Planned test: Assumption 2</h2>
+<p>The poisoning setting is now part of the select-then-train paper. Before any larger battery, one quick falsification test was pre-registered on 2026-11-12 (<code>simple/experiments/ecg_protocol.md</code> section 8; commands in <code>simple/EXPERIMENTS.md</code> section 3). It has not been run yet.</p>
 <div class="table-wrap">
 <table>
-  <thead><tr><th>#</th><th>Setting</th><th>Methods compared</th></tr></thead>
+  <thead><tr><th>Item</th><th>Setting</th></tr></thead>
   <tbody>
-    <tr><td>H12</td><td>standard ×5</td><td>Selector (fedavg, median, krum) against FedStrategist (paper, authors, loss reward), SARA, FedAvg, Median and Krum</td></tr>
-    <tr><td>H13</td><td>standard ×5 + flip</td><td>Same as H12</td></tr>
-    <tr><td>H14</td><td>standard, active in rounds 1–40 and 81–120</td><td>Selector, SARA, the three FedStrategist variants</td></tr>
-    <tr><td>H15</td><td>10, 30 or 40 attackers, and the stealth attack</td><td>Same as H12</td></tr>
+    <tr><td>Attack</td><td>20 of 100 clients, standard ×5 with flip, every round. Krum's <em>f</em> fixed at 4 for every method</td></tr>
+    <tr><td>Ours</td><td><code>select_train</code> over fedavg, median, krum</td></tr>
+    <tr><td>Existing methods</td><td>FedAvg, Median, Krum, FLTrust, server training (<code>train</code>), FedStrategist (paper preset), SARA (once checked against its paper)</td></tr>
+    <tr><td>Decision</td><td>Ours against the per-seed best existing method, seeds 72–81. PASS if the gain is above 0 with one-sided p &lt; 0.05; FAIL if the gain is at most 0. Otherwise, extend once to 30 seeds</td></tr>
+    <tr><td>Validity</td><td>Attacked FedAvg must score at least 0.05 AUPRC-AUC below clean FedAvg, or the test is uninformative</td></tr>
   </tbody>
 </table>
 </div>

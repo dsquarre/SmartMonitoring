@@ -17,7 +17,7 @@ method, and the simple simulator (`../simple`) imports the same package, so a me
 | Slot | Setting | Plugins |
 |---|---|---|
 | Client selector | `FL_SELECTOR` | `oort` (default; the TMLR supplement's port), `random` |
-| Server rule: one way to combine the client updates | used by the controllers; `FL_RULES` overrides a controller's set | `fedavg`, `fedyogi`, `median` (coordinate-wise), `krum` |
+| Server rule: one way to combine the client updates | used by the controllers; `FL_RULES` overrides a controller's set | `fedavg`, `fedyogi`, `median` (coordinate-wise), `krum`, `fltrust` (needs the server validation set) |
 | Server controller: which rule each round, and whether to train on V | `FL_AGGREGATOR` | `select_train` (default, ours), `select`, `train`, `train_select`, `fedstrategist`, `sara`, or a rule name for that rule every round |
 | Client behaviour | `FL_ATTACK`, `FL_ATTACK_FLIP` on a client | `none`, `standard` (5x the honest update); `stealth` is simulator-only, since it needs every client's update |
 

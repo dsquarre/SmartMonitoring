@@ -36,3 +36,5 @@ run/
 .agents
 # experiment job-runner logs
 simple/experiments/*_logs/
+# papers under copyright (e.g. the SARA paper): keep local
+docs/papers/*.pdf
